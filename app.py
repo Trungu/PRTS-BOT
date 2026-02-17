@@ -7,6 +7,7 @@ import requests
 
 # INTERNAL MODULES
 from utils.prompts import SYSTEM_PROMPT
+from tools.math_tools import display_latex
 
 from flask import json
 from openai import AsyncOpenAI
@@ -83,7 +84,28 @@ tools = [
                 "required": ["latex_code"]
             }
         }
-    }
+    },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "display_tutorial",
+    #         "description": "Use this tool to create an interactive tutorial with step-by-step instructions and explanations. This is ideal for guiding users through complex problems or concepts in a structured manner.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "steps": {
+    #                     "type": "array",
+    #                     "items": {
+    #                         "type": "string",
+    #                         "description": "A single step in the tutorial, which can include instructions, explanations, or any relevant information for that step."
+    #                     },
+    #                     "description": "An array of steps that make up the tutorial. Each step should be concise and focused on a specific part of the problem or concept being explained."
+    #                 }
+    #             },
+    #             "required": ["steps"]
+    #         }
+    #     }
+    # }
 ]
 
 # defining some UI functionality
@@ -160,7 +182,7 @@ class MyClient(discord.Client):
         }
 
         message_block = [system_instruction] + [{"role": "user", "content": content}]
-        file_produced = None# Update the tool description to encourage self-deciding
+        file_produced = None # Update the tool description to encourage self-deciding
      
         # response loop for tool calls
         for _ in range(3):  # allow up to 3 tool calls
@@ -230,6 +252,7 @@ class MyClient(discord.Client):
 
 
                     # image tool call
+                    # does not work currently
                     elif tool_call.function.name == "fetch_image":
                         args_dict = json.loads(tool_call.function.arguments)
                         query = args_dict.get("query", "").lower() # Case-insensitive
@@ -258,30 +281,27 @@ class MyClient(discord.Client):
                     # latex tool call
                     elif tool_call.function.name == "display_latex":
                         args_dict = json.loads(tool_call.function.arguments)
-                        latex_code = args_dict.get("latex_code", "")
+                        latex_input = args_dict.get("latex_code", "")
 
-                        # NEW: Automatically fix double-escaping and newlines before processing
-                        latex_code = latex_code.replace("\\\\", "\\").replace("\n", " ") 
-                        last_latex_rendered = latex_code
-                     
-                        encoded_latex = latex_code.replace(" ", "&space;")
-                        url = f"https://latex.codecogs.com/png.latex?\\dpi{{300}}\\color{{white}}{encoded_latex}"
+                        clean_latex, file_produced = await display_latex(latex_input)
 
-                        # 2. Fetch the image from the API
-                        response = requests.get(url)
+                        last_latex_rendered = clean_latex  # Store the last rendered LaTeX for context in future responses
                         
-                        if response.status_code == 200:
-                            # 3. Put the raw image data into your io_buffer
-                            # store the file but don't send it yet, we want to give the model the option to call multiple tools before sending a response
-                            file_produced = discord.File(io.BytesIO(response.content), filename="rendered_latex.png")
-
+                        if file_produced:
                             message_block.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
                                 "name": "display_latex",
-                                "content": f"Rendered LaTeX image ready: {file_produced.filename}",
+                                "content": f"Successfully rendered LaTeX: {file_produced.filename}"
                             })
-
+                        else:
+                            message_block.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": "display_latex",
+                                "content": f"Failed to render LaTeX image."
+                            })
+                    
                     # continue if a tool was called, otherwise break the loop and return the response
                 continue
             else:
