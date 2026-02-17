@@ -1,4 +1,6 @@
 # ------- OTHER -------
+# MACOS
+.DS_Store
 
 # ------- PYTHON BOILERPLATE -------
 # Byte-compiled / optimized / DLL files
