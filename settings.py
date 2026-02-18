@@ -61,5 +61,21 @@ PREFIX_SMART_CHARS: list[str] = [c for c in _smart_chars_raw.split("|") if c != 
 # Defaults to False (case-insensitive), so 'BOT hello' works the same as 'bot hello'.
 PREFIX_CASE_SENSITIVE: bool = (get_env_var("PREFIX_CASE_SENSITIVE", required=False) or "false").strip().lower() == "true"
 
+# ---------------------------------------------------------------------------
+# KaTeX / math renderer
+# ---------------------------------------------------------------------------
+
+# Background colour: "none" for transparent, or a hex string e.g. "#2b2d31".
+KATEX_BG_COLOR: str = "none"
+
+# Math/text colour. #CCCCCC is readable on Discord's dark-mode background.
+KATEX_FG_COLOR: str = "#CCCCCC"
+
+# Font size in points.
+KATEX_FONT_SIZE: int = 18
+
+# DPI of the saved PNG.
+KATEX_DPI: int = 200
+
 
 
