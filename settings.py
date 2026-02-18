@@ -90,5 +90,16 @@ TOOLCALL_SILENT: bool = (get_env_var("TOOLCALL_SILENT", required=False) or "fals
 # Overrides TOOLCALL_SILENT. Set GLOBAL_SILENT=true in .env to enable.
 GLOBAL_SILENT: bool = (get_env_var("GLOBAL_SILENT", required=False) or "false").strip().lower() == "true"
 
+# ---------------------------------------------------------------------------
+# Smart message cutoff
+# ---------------------------------------------------------------------------
+
+# If True, long replies are split at natural language boundaries (paragraph,
+# sentence, word) rather than a hard character-count chop.
+# If False, replies are still safely split at 2000 chars (no crash), just
+# without trying to find a clean break point.
+# Set SMART_CUTOFF=false in .env to disable.
+SMART_CUTOFF: bool = (get_env_var("SMART_CUTOFF", required=False) or "true").strip().lower() == "true"
+
 
 

@@ -42,7 +42,7 @@ class Message(TypedDict):
 # ---------------------------------------------------------------------------
 
 _DEFAULT_BASE_URL  = "https://api.groq.com/openai/v1"
-_DEFAULT_MODEL     = "llama3-8b-8192"
+_DEFAULT_MODEL     = "llama-3.1-8b-instant"
 MAX_TOOL_CALLS     = 99   # hard ceiling on agentic iterations
 
 # ---------------------------------------------------------------------------
