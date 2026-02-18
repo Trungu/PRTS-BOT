@@ -293,9 +293,10 @@ class LLM(commands.Cog):
                 await _send(message.channel, f"⚠️ The LLM returned an error: `{exc}`")
                 return
 
-        # Send the reply, rendering any embedded LaTeX blocks as PNG images.
-        # Text is split at natural boundaries; math is rendered inline.
-        await _send_reply_with_math(message.channel, reply)
+            # Send the reply inside the typing context so the indicator stays
+            # active during the full reply delivery (including LaTeX rendering).
+            # Text is split at natural boundaries; math is rendered inline.
+            await _send_reply_with_math(message.channel, reply)
 
 
 async def setup(bot: commands.Bot) -> None:

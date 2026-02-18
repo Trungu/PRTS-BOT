@@ -19,7 +19,10 @@ def _build_prefix_variants(prefix: str, smart_chars: list[str], case_sensitive: 
         if variant not in variants:
             variants.append(variant)
 
-    return variants
+    # Sort longest-first so 'bot, ' is tried before bare 'bot'.
+    # Without this, 'bot, hello' would match 'bot' first and pass
+    # ', hello' to handlers instead of the intended 'hello'.
+    return sorted(variants, key=len, reverse=True)
 
 
 # Pre-build variants at import time so we don't recompute on every message

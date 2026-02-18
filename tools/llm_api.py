@@ -191,7 +191,15 @@ def chat(
 
         # --- Final text reply -------------------------------------------------
         content = message.get("content") or ""
-        if not content and finish_reason != "tool_calls":
+        if not content:
+            if finish_reason == "tool_calls":
+                # The model is still requesting tool calls but the cap has been
+                # reached and no tools were sent.  Raise so the caller can report
+                # a clear error rather than silently delivering an empty reply.
+                raise ValueError(
+                    f"Maximum tool-call limit ({MAX_TOOL_CALLS}) reached but the "
+                    f"model did not return a text reply."
+                )
             raise ValueError(f"Unexpected API response shape: {data}")
 
         return content.strip()
