@@ -1,3 +1,6 @@
+# save until all features are implemented
+
+
 # EXTERNAL LIBRARIES
 import discord
 import matplotlib.pyplot as plt
