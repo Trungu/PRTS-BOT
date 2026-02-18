@@ -57,7 +57,7 @@ _SAFE_NAMES: dict[str, object] = {
 _ALLOWED_NODE_NAMES = [
     "Expression", "BoolOp", "BinOp", "UnaryOp", "IfExp",
     "Call", "Constant", "Name", "Load",
-    "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod",
+    "Add", "Sub", "Mult", "Div", "FloorDiv", "Mod",
     "Pow", "UAdd", "USub", "BitOr", "BitAnd", "BitXor",
     "LShift", "RShift", "Invert",
     "Compare", "Eq", "NotEq", "Lt", "LtE", "Gt", "GtE",

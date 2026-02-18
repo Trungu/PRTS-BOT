@@ -6,10 +6,8 @@ import json
 import discord
 from discord.ext import commands
 
-from utils.prefix_handler import get_command
 from utils.logger import log, LogLevel
 from utils.prompts import SYSTEM_PROMPT
-from utils.command_registry import is_known
 from tools.llm_api import chat, MAX_TOOL_CALLS
 import settings
 
@@ -33,7 +31,7 @@ def _should_silent_toolcall() -> bool:
     return settings.GLOBAL_SILENT or settings.TOOLCALL_SILENT
 
 
-async def _send(channel: discord.TextChannel, content: str, *, force_silent: bool = False) -> None:
+async def _send(channel: discord.abc.Messageable, content: str, *, force_silent: bool = False) -> None:
     """Send *content* to *channel*, applying silent flags when configured."""
     if _should_silent_all() or force_silent:
         await channel.send(content, silent=True)
@@ -47,35 +45,9 @@ class LLM(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    # ------------------------------------------------------------------
-    # Events
-    # ------------------------------------------------------------------
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        """Route messages that match the custom prefix to LLM handlers."""
-        if message.author.bot:
-            return
-
-        command = get_command(message.content)
-        if command is None:
-            return
-
-        await self._dispatch(message, command)
-
-    # ------------------------------------------------------------------
-    # Internal dispatcher
-    # ------------------------------------------------------------------
-
-    async def _dispatch(self, message: discord.Message, command: str) -> None:
-        cmd = command.strip()
-
-        # If the command matches any registered cog command, leave it alone.
-        if is_known(cmd):
-            return
-
-        # Everything else is treated as a freeform LLM prompt.
-        await self._ask(message, cmd)
+        # Register as the catch-all fallback — only receives messages that no
+        # other cog handler claimed, so it can never swallow a known command.
+        bot.set_llm_handler(self._ask)
 
     # ------------------------------------------------------------------
     # Handlers

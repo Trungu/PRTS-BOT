@@ -22,6 +22,7 @@ import requests
 from typing import Callable, Literal, TypedDict
 
 import settings
+from tools.toolcalls.tool_registry import TOOLS, TOOL_DEFINITIONS
 
 # ---------------------------------------------------------------------------
 # Types
@@ -98,8 +99,6 @@ def chat(
     ValueError
         When the response JSON is missing expected fields.
     """
-    from tools.toolcalls.tool_registry import TOOLS, TOOL_DEFINITIONS  # local import avoids circular deps
-
     # --- Build the message list ------------------------------------------------
     if isinstance(messages, str):
         payload_messages: list[dict] = []
