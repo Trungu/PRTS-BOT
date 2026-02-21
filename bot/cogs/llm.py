@@ -6,12 +6,14 @@ import json
 import os
 import re
 from contextlib import suppress
+from typing import cast
 
 import discord
 from discord.ext import commands
 
+from bot.client import Bot
 from utils.logger import log, LogLevel
-from utils.prompts import SYSTEM_PROMPT
+from utils.prompts import SYSTEM_PROMPT, contains_prompt_leak
 from tools.llm_api import chat, MAX_TOOL_CALLS
 from tools.toolcalls.code_runner import get_manager as _get_sandbox_manager
 from tools import katex_formatter
@@ -142,7 +144,7 @@ async def _send_reply_with_math(
 class LLM(commands.Cog):
     """Commands that interact with the language model."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: Bot) -> None:
         self.bot = bot
 
         # Register as the catch-all fallback — only receives messages that no
@@ -284,6 +286,20 @@ class LLM(commands.Cog):
                     f"[LLM] Response received for {message.author} "
                     f"| {len(reply)} chars"
                 )
+
+                # Guard: block any reply that echoes the system prompt.
+                if contains_prompt_leak(reply):
+                    log(
+                        f"[LLM] Prompt leak detected in response for "
+                        f"{message.author} — reply blocked",
+                        LogLevel.WARNING,
+                    )
+                    await _send(
+                        message.channel,
+                        "⚠️ I can't share that information.",
+                    )
+                    return
+
             except Exception as exc:
                 log(
                     f"[LLM] API error for {message.author} "
@@ -307,4 +323,4 @@ class LLM(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Entry point called by Bot.load_extension."""
-    await bot.add_cog(LLM(bot))
+    await bot.add_cog(LLM(cast(Bot, bot)))
