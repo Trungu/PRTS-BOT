@@ -112,3 +112,79 @@ def test_load_cogs_loads_py_extensions(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(bot._load_cogs())
 
     assert loaded == ["bot.cogs.general", "bot.cogs.llm"]
+
+
+# ---------------------------------------------------------------------------
+# Crisis detector integration
+# ---------------------------------------------------------------------------
+
+def test_crisis_message_without_prefix_sends_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A distress message that has no bot prefix still receives the crisis response."""
+    bot = Bot()
+    # Message has no bot prefix — get_command returns None — but crisis must
+    # still be detected and responded to before the prefix check.
+    msg = DummyMessage("I want to kill myself")
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: None)
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: True)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert len(msg.channel.sent) == 1
+    content, _ = msg.channel.sent[0]
+    assert "988" in content or "741741" in content or "iasp.info" in content
+
+
+def test_crisis_message_with_prefix_sends_resources_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A distress message that also has a bot prefix receives crisis resources
+    AND has the command dispatched normally."""
+    bot = Bot()
+    msg = DummyMessage("gemma, kill myself please help")
+
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("kill", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "kill")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: True)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    # Crisis response was sent
+    assert len(msg.channel.sent) >= 1
+    content, _ = msg.channel.sent[0]
+    assert "988" in content or "741741" in content or "iasp.info" in content
+    # Command was also dispatched
+    assert dispatched == ["kill"]
+
+
+def test_no_crisis_response_for_normal_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Normal messages do not trigger the crisis response."""
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert msg.channel.sent == []

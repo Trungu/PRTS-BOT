@@ -22,6 +22,7 @@
 12. [Code Conventions](#12-code-conventions)
 13. [What NOT to Do](#13-what-not-to-do)
 14. [Quick Checklist for Any Change](#14-quick-checklist-for-any-change)
+15. [Crisis / Distress Detection](#15-crisis--distress-detection)
 
 ---
 
@@ -68,6 +69,7 @@ utils/
   logger.py              — Structured logger (log(), LogLevel enum).
   prompts.py             — SYSTEM_PROMPT and prompt-leak guard (contains_prompt_leak).
   admin.py               — Admin-only mode state machine + admin.txt parser.
+  crisis_detector.py     — Distress keyword detection + CRISIS_RESPONSE message.
 
 tools/
   llm_api.py             — HTTP wrapper around OpenAI-compatible chat completions API.
@@ -78,6 +80,7 @@ tools/
     terminal_runner.py   — run_terminal() — executes shell commands in sandbox.
     unit_converter.py    — Engineering unit converter (SI-based).
     tool_registry.py     — Maps tool names → callables + OpenAI tool definitions.
+    safety_responder.py  — LLM-callable tools: send_crisis_response, send_pr_deflection.
   docker/
     docker_manager.py    — DockerManager: starts/stops/executes in the sandbox container.
     Dockerfile           — Sandbox image definition. Python 3.13, Java JDK, gVisor.
@@ -99,7 +102,12 @@ User types:  "gemma, hello"
                   ▼
           bot/client.py  on_message()
                   │
+          [crisis gate] detect_crisis(message.content)?
+                  │  YES → send CRISIS_RESPONSE (then CONTINUE — do not return)
+                  │  NO  → continue
+                  │
           prefix_handler.get_command()  →  strips prefix  →  "hello"
+                  │  (None if no prefix → return)
                   │
           [admin gate] is_admin_only() and not is_allowed(author.id)?
                   │  YES → send "⛔ Admin-only mode is active." and return
@@ -155,6 +163,27 @@ the exact pattern.
 `bot.set_llm_handler()` can only be called once (one fallback). The LLM cog
 calls it in `LLM.__init__()`. Any message that matches a registered prefix
 but has no matching command key falls through to the LLM.
+
+### Crisis gate (runs before prefix check)
+
+The very first check in `on_message`, before even stripping the prefix:
+
+```python
+if detect_crisis(message.content):
+    await message.channel.send(CRISIS_RESPONSE)
+# Does NOT return — processing continues normally.
+```
+
+Key properties:
+- Fires on **every** non-bot message, regardless of prefix, admin mode, or ban status.
+- Does **not** short-circuit the rest of `on_message` — if the message also has
+  a valid prefix, the command is still dispatched after the crisis response.
+- `detect_crisis` and `CRISIS_RESPONSE` are imported at module level from
+  `utils.crisis_detector`. In tests, monkeypatch them at the import site:
+
+```python
+monkeypatch.setattr("bot.client.detect_crisis", lambda text: True)
+```
 
 ### Admin gate
 
@@ -483,7 +512,7 @@ prefix is prepended to the prompt so the LLM knows they are available.
 .venv/bin/python -m pytest tests/test_admin.py -v  # one file
 ```
 
-**All tests must pass before any commit. Currently: 206 tests, 0 failures.**
+**All tests must pass before any commit. Currently: 334 tests, 0 failures.**
 
 ### Test file naming
 
@@ -643,6 +672,106 @@ letting an unhandled exception silently swallow the request. The LLM cog's
     LLM worker runs in a thread executor — that's why it uses
     `asyncio.run_coroutine_threadsafe()` to post back to the event loop.
 
+11. **Do NOT remove or weaken the crisis gate.** The `detect_crisis` check in
+    `bot/client.py` must remain the first check in `on_message` (before admin
+    gate, ban gate, and prefix check) and must never `return` early — the
+    response should be sent AND normal processing should continue. Removing it
+    silently is a serious PR and safety risk for a public-facing bot.
+
+---
+
+## 15. Crisis / Distress Detection & Safety Tool Calls
+
+### Purpose
+
+The bot is public-facing and watched by non-technical stakeholders. Two separate
+layers handle safety signals:
+
+| Layer | Where | Fires when | Action |
+|---|---|---|---|
+| **Keyword gate** | `bot/client.py` `on_message` | Message matches `_CRISIS_PHRASES` list | Sends `CRISIS_RESPONSE` immediately — no LLM involved |
+| **LLM tool calls** | `bot/cogs/llm.py` `on_tool_call` | LLM calls `send_crisis_response()` or `send_pr_deflection()` | Sends appropriate pre-written message directly to Discord |
+
+The keyword gate catches obvious distress signals before the LLM even sees the
+message. The LLM tool calls catch subtler cases — nuanced phrasing, context-
+dependent distress, and PR-risky questions that keyword matching would miss.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `utils/crisis_detector.py` | `detect_crisis(text)` keyword detector + `CRISIS_RESPONSE` string |
+| `tools/toolcalls/safety_responder.py` | `send_crisis_response()`, `send_pr_deflection(topic)` tool functions + definitions + `PR_DEFLECTION_RESPONSE` |
+| `bot/client.py` | Keyword gate in `on_message` (before prefix check) |
+| `bot/cogs/llm.py` | `on_tool_call` sentinel handler sends safety messages to Discord |
+| `tools/toolcalls/tool_registry.py` | Both tools registered |
+| `utils/prompts.py` | `SYSTEM_PROMPT` entries instructing LLM when to call each tool |
+| `tests/test_crisis_detector.py` | Tests for keyword detection |
+| `tests/test_safety_responder.py` | Tests for the tool functions |
+| `tests/test_tool_registry.py` | Registration checks |
+| `tests/test_bot_client.py` | Keyword gate integration tests |
+
+### How the sentinel tag works
+
+The tool functions do **not** send to Discord directly (tools are pure functions
+running in a thread executor). Instead they return a sentinel-tagged string:
+
+```python
+# send_crisis_response() returns:
+"[__safety_response__=crisis] Crisis resources delivered to the user."
+
+# send_pr_deflection(topic) returns:
+"[__safety_response__=pr_deflection] PR deflection delivered for topic: 'topic'"
+```
+
+The `on_tool_call` callback in `bot/cogs/llm.py` matches the tag with a regex,
+sends the correct pre-written message to Discord, and **returns early** so no
+normal `🔧 tool() → result` notice is shown. The LLM also sees the tagged
+result as a tool message and is instructed in `SYSTEM_PROMPT` to acknowledge
+briefly without repeating the message.
+
+This is architecturally identical to the `[__discord_file__=path]` mechanism
+used by `get_workspace_file`.
+
+### `utils/crisis_detector.py` — keyword gate
+
+```python
+detect_crisis(text: str) -> bool
+CRISIS_RESPONSE: str   # the full emergency resources message
+```
+
+`_CRISIS_PHRASES` is a list of plain substrings and `\b`-anchored regex patterns.
+To add a new phrase: add to the list, add a true-positive test in
+`tests/test_crisis_detector.py`, and a false-positive test if needed.
+
+### `tools/toolcalls/safety_responder.py` — LLM tool layer
+
+```python
+SAFETY_RESPONSE_TAG: str        # "__safety_response__" — do NOT rename
+CRISIS_RESPONSE: str            # re-exported from utils.crisis_detector
+PR_DEFLECTION_RESPONSE: str     # neutral professional deflection text
+send_crisis_response() -> str
+send_pr_deflection(topic: str) -> str
+CRISIS_TOOL_DEFINITION: dict
+PR_DEFLECTION_TOOL_DEFINITION: dict
+```
+
+### Adding a new response type
+
+1. Define the message constant in `safety_responder.py`.
+2. Write a new tool function returning `[{SAFETY_RESPONSE_TAG}=<new_type>] ...`.
+3. Add a `TOOL_DEFINITION` dict with a clear `description` for the LLM.
+4. Register in `tool_registry.py`.
+5. Add an `elif response_type.startswith("<new_type>")` branch in the
+   `on_tool_call` sentinel handler in `bot/cogs/llm.py`.
+6. Add a bullet in `SYSTEM_PROMPT` (`utils/prompts.py`) describing when to call it.
+7. Write tests in `tests/test_safety_responder.py`.
+
+### Monkeypatching in tests
+
+- Keyword gate: `monkeypatch.setattr("bot.client.detect_crisis", lambda text: True/False)`
+- The tool functions themselves need no mocking — test them directly.
+
 ---
 
 ## 14. Quick Checklist for Any Change
@@ -659,3 +788,5 @@ letting an unhandled exception silently swallow the request. The LLM cog's
 - [ ] Write tests covering happy path, error path, and any permission gate.
 - [ ] Run `.venv/bin/python -m pytest` — all tests must pass.
 - [ ] Do not commit new markdown docs unless specifically asked.
+- [ ] If editing `on_message` in `bot/client.py`: verify the crisis gate is still the first check and still does NOT return early.
+- [ ] If adding a new LLM safety tool: follow the 7-step process in Section 15 (new response type).

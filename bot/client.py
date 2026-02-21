@@ -9,6 +9,7 @@ from discord.ext import commands
 from utils.logger import log, LogLevel
 from utils.prefix_handler import get_command
 from utils.admin import is_admin_only, is_allowed, is_banned
+from utils.crisis_detector import detect_crisis, CRISIS_RESPONSE
 
 # Type alias for a command handler: receives a Message and the stripped command string.
 CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
@@ -85,6 +86,12 @@ class Bot(commands.Bot):
         """
         if message.author.bot:
             return
+
+        # Crisis / distress gate — runs on ALL messages, no prefix required.
+        # Sends emergency resources immediately and then continues normal
+        # processing so any legitimate command is still handled.
+        if detect_crisis(message.content):
+            await message.channel.send(CRISIS_RESPONSE)
 
         command = get_command(message.content)
         if command is None:

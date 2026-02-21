@@ -16,6 +16,11 @@ from utils.logger import log, LogLevel
 from utils.prompts import SYSTEM_PROMPT, contains_prompt_leak
 from tools.llm_api import chat, MAX_TOOL_CALLS
 from tools.toolcalls.code_runner import get_manager as _get_sandbox_manager
+from tools.toolcalls.safety_responder import (
+    SAFETY_RESPONSE_TAG,
+    CRISIS_RESPONSE as _CRISIS_RESPONSE,
+    PR_DEFLECTION_RESPONSE as _PR_DEFLECTION_RESPONSE,
+)
 from tools import katex_formatter
 import settings
 
@@ -259,6 +264,25 @@ class LLM(commands.Cog):
                     loop,
                 )
                 return
+
+            # ── Safety response: detect [__safety_response__=<type>] tag ─────
+            # send_crisis_response / send_pr_deflection embed this tag so the
+            # cog sends the correct pre-written message directly to Discord
+            # without exposing the raw sentinel string as a tool notice.
+            safety_match = re.search(
+                rf"\[{re.escape(SAFETY_RESPONSE_TAG)}=([^\]]+)\]", result
+            )
+            if safety_match:
+                response_type = safety_match.group(1)
+                if response_type.startswith("crisis"):
+                    safety_msg = _CRISIS_RESPONSE
+                else:
+                    safety_msg = _PR_DEFLECTION_RESPONSE
+                asyncio.run_coroutine_threadsafe(
+                    _send(message.channel, safety_msg),
+                    loop,
+                )
+                return  # suppress normal tool notice
 
             # ── Normal tool-call notice ───────────────────────────────────────
             args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
