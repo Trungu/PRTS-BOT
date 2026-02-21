@@ -141,6 +141,15 @@ bot.register_command("my command", self._handler)   # exact / prefix match
 bot.set_llm_handler(self._ask)                       # catch-all fallback (only one)
 ```
 
+### Sequential LLM processing
+
+`Bot` holds a single `asyncio.Lock` (`self._llm_lock`).  Every call to
+`_llm_handler` is wrapped with `async with self._llm_lock:` so only one LLM
+request runs at a time.  When multiple users send prompts concurrently each
+request queues behind the current one — responses never interleave.  Registered
+command handlers (non-LLM) are **not** serialised; they bypass the lock
+entirely and remain concurrent.
+
 ### Longest-match wins
 
 `register_command("clear")` and `register_command("clear history")` can
@@ -488,6 +497,15 @@ installation required) and sent as Discord file attachments.
 Render failures fall back gracefully to a fenced code block. Temp PNG files
 are deleted by `katex_formatter.cleanup()` after sending.
 
+### Reply threading
+
+`_send_reply_with_math` accepts an optional `reply_to: discord.Message | None`
+parameter.  When provided, the **first chunk only** (text or image) is sent
+via `reply_to.reply()` so Discord shows the context link back to the user's
+original message.  All subsequent chunks are sent with a plain `channel.send()`.
+Error responses (`⚠️ prompt leak`, `⚠️ API error`) also use `message.reply()`
+so every bot response is visually linked to the message that triggered it.
+
 ### Prompt leak guard
 
 `utils/prompts.contains_prompt_leak(response)` uses a sliding window of 30
@@ -547,6 +565,9 @@ class DummyMessage:
     def __init__(self, user_id=0):
         self.author = DummyAuthor(user_id)
         self.channel = DummyChannel()
+    async def reply(self, content=None, **kwargs):
+        """Delegates to channel.send so msg.channel.sent captures replies too."""
+        await self.channel.send(content, **kwargs)
 ```
 
 ### Running async handlers in tests
@@ -615,6 +636,12 @@ for low-level infrastructure). Log levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`.
 Always go through `_send()` in `bot/cogs/llm.py` when inside the LLM cog —
 it applies `GLOBAL_SILENT` flags. In other cogs, use
 `await message.channel.send(...)` directly.
+
+For the **final LLM reply** and any error responses in `_ask`, use
+`message.reply()` (or pass `reply_to=message` to `_send_reply_with_math`) so
+Discord links the response back to the triggering message.  Tool-call notices
+(`🔧 tool()`) and file-send notices are informational and use plain
+`channel.send()`.
 
 ### 2000-character limit
 

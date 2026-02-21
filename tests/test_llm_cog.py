@@ -25,6 +25,10 @@ class DummyMessage:
         self.channel = DummyChannel()
         self.attachments: list = []
 
+    async def reply(self, content=None, **kwargs) -> None:
+        """Delegate to channel.send so test assertions on channel.sent still work."""
+        await self.channel.send(content, **kwargs)
+
 
 class DummyBot:
     def __init__(self) -> None:

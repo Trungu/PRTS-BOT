@@ -1,6 +1,7 @@
 # bot/client.py — Bot subclass with cog auto-loading and lifecycle hooks.
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Awaitable, Callable
 import discord
@@ -53,6 +54,8 @@ class Bot(commands.Bot):
         self._command_handlers: dict[str, CommandHandler] = {}
         # Optional catch-all for unrecognised commands (typically the LLM cog).
         self._llm_handler: LLMHandler | None = None
+        # Serialises concurrent LLM requests so responses never interleave.
+        self._llm_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Handler registration (called by cogs in their __init__)
@@ -117,8 +120,11 @@ class Bot(commands.Bot):
                 return
 
         # Nothing matched — hand off to the LLM fallback.
+        # The lock ensures requests are processed one at a time so concurrent
+        # users' responses never interleave with each other.
         if self._llm_handler is not None:
-            await self._llm_handler(message, command)
+            async with self._llm_lock:
+                await self._llm_handler(message, command)
         else:
             log(f"[Bot] No handler for command: {command!r}", LogLevel.WARNING)
 

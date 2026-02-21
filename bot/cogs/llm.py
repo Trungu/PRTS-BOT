@@ -107,6 +107,7 @@ async def _send_reply_with_math(
     reply: str,
     *,
     force_silent: bool = False,
+    reply_to: discord.Message | None = None,
 ) -> None:
     """Send *reply* to *channel*, rendering embedded LaTeX blocks as PNG images.
 
@@ -116,6 +117,10 @@ async def _send_reply_with_math(
     via :mod:`tools.katex_formatter` and sent as a Discord file attachment so
     it displays inline.  If rendering fails the raw expression is sent as a
     fenced code block instead.
+
+    If *reply_to* is given, the very first chunk (text or image) is sent as a
+    Discord reply to that message so the context is visually linked in the
+    channel.  All subsequent chunks are sent as regular channel messages.
     """
     segments = katex_formatter.parse_math_segments(reply)
 
@@ -126,6 +131,8 @@ async def _send_reply_with_math(
             LogLevel.DEBUG,
         )
 
+    _replied = False  # True once the first chunk has been sent as a Discord reply
+
     for seg in segments:
         if seg["type"] == "text":
             if settings.SMART_CUTOFF:
@@ -134,17 +141,31 @@ async def _send_reply_with_math(
                 chunks = _split_hard(seg["content"])
             for chunk in chunks:
                 if chunk.strip():
-                    await _send(channel, chunk, force_silent=force_silent)
+                    if reply_to is not None and not _replied:
+                        _replied = True
+                        kwargs: dict = {"content": chunk}
+                        if _should_silent_all() or force_silent:
+                            kwargs["silent"] = True
+                        await reply_to.reply(**kwargs)
+                    else:
+                        await _send(channel, chunk, force_silent=force_silent)
         else:
             expr = seg["expression"]
             try:
                 png_path = await asyncio.to_thread(katex_formatter.render, expr)
                 try:
                     disc_file = discord.File(str(png_path))
-                    kwargs: dict = {"file": disc_file}
-                    if _should_silent_all() or force_silent:
-                        kwargs["silent"] = True
-                    await channel.send(**kwargs)
+                    if reply_to is not None and not _replied:
+                        _replied = True
+                        kwargs = {"file": disc_file}
+                        if _should_silent_all() or force_silent:
+                            kwargs["silent"] = True
+                        await reply_to.reply(**kwargs)
+                    else:
+                        kwargs = {"file": disc_file}
+                        if _should_silent_all() or force_silent:
+                            kwargs["silent"] = True
+                        await channel.send(**kwargs)
                 finally:
                     katex_formatter.cleanup(png_path)
             except Exception as exc:
@@ -152,8 +173,15 @@ async def _send_reply_with_math(
                     f"[LLM] LaTeX render failed for {expr!r}: {exc}",
                     LogLevel.ERROR,
                 )
-                # Fall back to a fenced code block so the expression is still readable.
-                await _send(channel, f"```\n{expr}\n```", force_silent=force_silent)
+                if reply_to is not None and not _replied:
+                    _replied = True
+                    kwargs = {"content": f"```\n{expr}\n```"}
+                    if _should_silent_all() or force_silent:
+                        kwargs["silent"] = True
+                    await reply_to.reply(**kwargs)
+                else:
+                    # Fall back to a fenced code block so the expression is still readable.
+                    await _send(channel, f"```\n{expr}\n```", force_silent=force_silent)
 
 
 class LLM(commands.Cog):
@@ -328,10 +356,7 @@ class LLM(commands.Cog):
                         f"{message.author} — reply blocked",
                         LogLevel.WARNING,
                     )
-                    await _send(
-                        message.channel,
-                        "⚠️ I can't share that information.",
-                    )
+                    await message.reply("⚠️ I can't share that information.")
                     return
 
                 # Guard: strip any safety sentinel tags the LLM may have
@@ -355,13 +380,13 @@ class LLM(commands.Cog):
                 _ERR_LIMIT = _DISCORD_MAX - 40  # leave room for the prefix + backticks
                 if len(err_str) > _ERR_LIMIT:
                     err_str = err_str[:_ERR_LIMIT] + "…"
-                await _send(message.channel, f"⚠️ The LLM returned an error: `{err_str}`")
+                await message.reply(f"⚠️ The LLM returned an error: `{err_str}`")
                 return
 
             # Send the reply inside the typing context so the indicator stays
             # active during the full reply delivery (including LaTeX rendering).
             # Text is split at natural boundaries; math is rendered inline.
-            await _send_reply_with_math(message.channel, reply)
+            await _send_reply_with_math(message.channel, reply, reply_to=message)
 
 
 async def setup(bot: commands.Bot) -> None:
