@@ -8,6 +8,7 @@ from tools.toolcalls.code_runner import (
     list_workspace,       LIST_WORKSPACE_TOOL_DEFINITION  as _LIST_DEF,
     get_workspace_file,   GET_WORKSPACE_FILE_TOOL_DEFINITION as _GET_FILE_DEF,
 )
+from tools.toolcalls.terminal_runner import run_terminal, TOOL_DEFINITION as _TERM_DEF
 from tools.toolcalls.unit_converter import unit_converter, TOOL_DEFINITION as _UNIT_DEF
 
 # ---------------------------------------------------------------------------
@@ -20,6 +21,7 @@ TOOLS: dict[str, Callable[[dict], str]] = {
     "run_python":         lambda args: run_python(args["code"]),
     "list_workspace":     lambda args: list_workspace(),
     "get_workspace_file": lambda args: get_workspace_file(args["filename"]),
+    "run_terminal":        lambda args: run_terminal(args["command"]),
     "unit_converter":     lambda args: unit_converter(
                               args["value"], args["from_unit"], args["to_unit"]
                           ),
@@ -31,5 +33,6 @@ TOOL_DEFINITIONS: list[dict] = [
     _CODE_DEF,
     _LIST_DEF,
     _GET_FILE_DEF,
+    _TERM_DEF,
     _UNIT_DEF,
 ]

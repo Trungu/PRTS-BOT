@@ -41,6 +41,16 @@ TOOLS — use them whenever appropriate, chaining multiple calls if needed:
   CSV/Excel, PDFs, HDF5, NumPy .npz, compiled binaries, etc.
   Typical workflow: run_python saves 'plot.png' → get_workspace_file('plot.png').
 
+• run_terminal(command)
+  Executes an arbitrary shell command in the same isolated Docker sandbox.
+  Runs as sandboxuser (non-root), no network, all capabilities dropped.
+  Use for: C/C++ compilation (gcc/g++), Java (javac/java), shell pipelines,
+  bc arithmetic, gnuplot/graphviz rendering, ImageMagick (convert/magick),
+  git operations, file management (tar, zip, cp, mv), and any CLI tool
+  in the sandbox image.
+  Prefer run_python for Python; use run_terminal for other languages or
+  shell pipelines. Files written to /workspace persist between calls.
+
 • unit_converter(value, from_unit, to_unit)
   Converts engineering / scientific units precisely.
   Covers: length, mass, time, temperature (C/F/K/R), pressure, force, energy,
