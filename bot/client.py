@@ -11,6 +11,13 @@ from utils.logger import log, LogLevel
 from utils.prefix_handler import get_command
 from utils.admin import is_admin_only, is_allowed, is_banned
 from utils.crisis_detector import detect_crisis, CRISIS_RESPONSE
+from utils.rate_limiter import (
+    check_rate_limit,
+    RateLimitResult,
+    WARNING_MESSAGE,
+    RATE_LIMITED_MESSAGE,
+    COOLDOWN_MESSAGE,
+)
 
 # Type alias for a command handler: receives a Message and the stripped command string.
 CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
@@ -109,6 +116,19 @@ class Bot(commands.Bot):
         if is_banned(message.author.id) and not is_allowed(message.author.id):
             await message.channel.send("⛔ You have been banned from using this bot.")
             return
+
+        # Rate-limit gate: admins bypass rate limiting entirely.
+        if not is_allowed(message.author.id):
+            rl_result = check_rate_limit(message.author.id)
+            if rl_result == RateLimitResult.COOLDOWN:
+                await message.channel.send(COOLDOWN_MESSAGE)
+                return
+            if rl_result == RateLimitResult.RATE_LIMITED:
+                await message.channel.send(RATE_LIMITED_MESSAGE)
+                return
+            if rl_result == RateLimitResult.WARNING:
+                await message.channel.send(WARNING_MESSAGE)
+                # Do NOT return — the message is still processed after the warning.
 
         cmd = command.lower().strip()
 

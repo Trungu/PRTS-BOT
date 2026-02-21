@@ -23,6 +23,7 @@
 13. [What NOT to Do](#13-what-not-to-do)
 14. [Quick Checklist for Any Change](#14-quick-checklist-for-any-change)
 15. [Crisis / Distress Detection](#15-crisis--distress-detection)
+16. [Rate Limiter](#16-rate-limiter)
 
 ---
 
@@ -70,6 +71,7 @@ utils/
   prompts.py             — SYSTEM_PROMPT and prompt-leak guard (contains_prompt_leak).
   admin.py               — Admin-only mode state machine + admin.txt parser.
   crisis_detector.py     — Distress keyword detection + CRISIS_RESPONSE message.
+  rate_limiter.py        — Per-user rate limiting with escalating stages.
 
 tools/
   llm_api.py             — HTTP wrapper around OpenAI-compatible chat completions API.
@@ -112,6 +114,16 @@ User types:  "gemma, hello"
           [admin gate] is_admin_only() and not is_allowed(author.id)?
                   │  YES → send "⛔ Admin-only mode is active." and return
                   │  NO  → continue
+                  │
+          [ban gate] is_banned(author.id) and not is_allowed(author.id)?
+                  │  YES → send "⛔ You have been banned." and return
+                  │  NO  → continue
+                  │
+          [rate-limit gate] (admins bypass)
+                  │  COOLDOWN  → send cooldown message and return
+                  │  RATE_LIMITED → send rejection message and return
+                  │  WARNING   → send warning (then CONTINUE — do not return)
+                  │  ALLOWED   → continue
                   │
           Walk _command_handlers (longest key first)
                   │
@@ -207,6 +219,37 @@ if is_admin_only() and not is_allowed(message.author.id):
 Both `is_admin_only` and `is_allowed` are **monkeypatched at the `bot.client`
 module level** in tests (not at `utils.admin`). Always patch
 `bot.client.is_admin_only` and `bot.client.is_allowed`.
+
+### Rate-limit gate
+
+After the admin and ban gates, before command dispatch:
+
+```python
+if not is_allowed(message.author.id):
+    rl_result = check_rate_limit(message.author.id)
+    if rl_result == RateLimitResult.COOLDOWN:
+        await message.channel.send(COOLDOWN_MESSAGE)
+        return
+    if rl_result == RateLimitResult.RATE_LIMITED:
+        await message.channel.send(RATE_LIMITED_MESSAGE)
+        return
+    if rl_result == RateLimitResult.WARNING:
+        await message.channel.send(WARNING_MESSAGE)
+        # Do NOT return — the message is still processed.
+```
+
+Key properties:
+- **Admins bypass entirely.** If `is_allowed(user_id)` is `True`, the rate
+  limiter is never consulted.
+- Three escalating stages: WARNING (soft, message still processed),
+  RATE_LIMITED (hard rejection), COOLDOWN (extended rejection after repeated
+  violations).
+- `check_rate_limit` is imported at module level from `utils.rate_limiter`.
+  In tests, monkeypatch at the import site:
+
+```python
+monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: RateLimitResult.ALLOWED)
+```
 
 ---
 
@@ -569,7 +612,7 @@ prefix is prepended to the prompt so the LLM knows they are available.
 .venv/bin/python -m pytest tests/test_admin.py -v  # one file
 ```
 
-**All tests must pass before any commit. Currently: 377 tests, 0 failures.**
+**All tests must pass before any commit. Currently: 409 tests, 0 failures.**
 
 ### Test file naming
 
@@ -866,3 +909,94 @@ PR_DEFLECTION_TOOL_DEFINITION: dict
 - [ ] Do not commit new markdown docs unless specifically asked.
 - [ ] If editing `on_message` in `bot/client.py`: verify the crisis gate is still the first check and still does NOT return early.
 - [ ] If adding a new LLM safety tool: follow the 7-step process in Section 15 (new response type).
+- [ ] If editing rate-limiter logic in `on_message`: verify admins still bypass, and the WARNING stage does NOT return early.
+---
+
+## 16. Rate Limiter
+
+### Purpose
+
+Prevents users from spamming the bot with rapid-fire messages. Three
+escalating stages apply increasing pressure to slow down:
+
+| Stage | Trigger | Action |
+|---|---|---|
+| **WARNING** | 4th message in 60 s | Sends a soft warning — message is still processed |
+| **RATE_LIMITED** | 6th+ message in 60 s | Message is rejected (not processed) |
+| **COOLDOWN** | 3+ rate-limit rejections in 5 min | ALL messages rejected for 2 minutes |
+
+Admins (`is_allowed(user_id) == True`) bypass the rate limiter entirely.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `utils/rate_limiter.py` | Core rate-limit logic, state, and configuration constants |
+| `bot/client.py` | Gate in `on_message()` (after admin/ban gates, before command dispatch) |
+| `tests/test_rate_limiter.py` | Unit tests for the rate limiter module |
+| `tests/test_bot_client.py` | Integration tests for the rate-limit gate in `on_message` |
+| `tests/conftest.py` | `_reset_rate_limiter` autouse fixture clears state between tests |
+
+### Configuration constants (`utils/rate_limiter.py`)
+
+| Constant | Default | Purpose |
+|---|---|---|
+| `RATE_LIMIT` | 5 | Max messages per window before hard rejection |
+| `WARNING_THRESHOLD` | 4 | Messages before a soft warning (must be < `RATE_LIMIT`) |
+| `WINDOW_SECONDS` | 60.0 | Sliding window size (seconds) |
+| `COOLDOWN_STRIKES` | 3 | Rate-limit rejections in `COOLDOWN_WINDOW` to trigger cooldown |
+| `COOLDOWN_WINDOW` | 300.0 | Window for counting strikes (5 minutes) |
+| `COOLDOWN_DURATION` | 120.0 | How long the cooldown lasts (2 minutes) |
+
+### Public API
+
+```python
+check_rate_limit(user_id: int) -> RateLimitResult
+    # Returns ALLOWED, WARNING, RATE_LIMITED, or COOLDOWN.
+    # Automatically records the timestamp — each call counts as a message.
+
+reset_rate_limit(user_id: int) -> None
+    # Clear all state for a single user.
+
+reset_all() -> None
+    # Clear all state for every user.
+
+is_rate_limited(user_id: int) -> bool
+    # True if the user is currently in cooldown.
+```
+
+### State is module-level
+
+Three dicts hold per-user state:
+- `_message_timestamps` — sliding window of message times
+- `_strike_timestamps` — sliding window of rate-limit rejection times
+- `_cooldown_until` — Unix timestamp when cooldown expires
+
+State is **not persisted** — it resets on bot restart, which is intentional.
+
+### Monkeypatching in client tests
+
+Patch at the `bot.client` import site (same pattern as admin/crisis):
+
+```python
+from utils.rate_limiter import RateLimitResult
+monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: RateLimitResult.ALLOWED)
+```
+
+### Monkeypatching time in unit tests
+
+The rate limiter uses `time.monotonic()`. To test window expiry or cooldown
+expiry, monkeypatch `rl.time` with a fake object:
+
+```python
+monkeypatch.setattr(rl, "time", type("FakeTime", (), {
+    "monotonic": staticmethod(lambda: future_timestamp),
+}))
+```
+
+### `conftest.py` autouse fixture
+
+`tests/conftest.py` includes a `_reset_rate_limiter` autouse fixture that calls
+`reset_all()` before every test. This prevents rate-limit state from leaking
+between tests. If you add new module-level state to the rate limiter, ensure
+`reset_all()` clears it.
