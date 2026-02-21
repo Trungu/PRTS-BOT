@@ -405,11 +405,16 @@ lock-down time, call `reload_allowed_users()` first.
 Three message-deletion commands are registered by `AdminCog`.  All require the
 caller to be listed in `admin.txt`.
 
+**Critical rule: delete commands ONLY delete the bot's own messages.  User
+messages are NEVER deleted.**  This is enforced by checking
+`msg.author.id == self.bot.user.id` (for `delete response` and `delete count`)
+or by passing a `check` filter to `channel.purge()` (for `delete time`).
+
 | Command | Behaviour |
 |---|---|
-| `delete response` | Scans history backwards from the command message. Deletes every consecutive **bot** message until the first human message is reached, then stops. Also deletes the command message itself. |
-| `delete count <N>` | Purges the last N messages plus the command message (`channel.purge(limit=N+1)`). N must be a positive integer. |
-| `delete time <duration>` | Purges up to 500 messages sent within the last `<duration>` (`channel.purge(limit=500, after=cutoff)`). |
+| `delete response` | Scans history backwards from the command message. Deletes every consecutive message **authored by this bot** until a non-bot message is reached, then stops. The user's command message is **not** deleted. If no bot messages are found, sends an info message. |
+| `delete count <N>` | Scans history and deletes up to N messages **authored by this bot**, skipping any user messages. N must be a positive integer. The user's command message is **not** deleted. If no bot messages are found, sends an info message. |
+| `delete time <duration>` | Purges up to 500 **bot-authored** messages sent within the last `<duration>` by passing `check=lambda msg: msg.author.id == bot_id` to `channel.purge()`. User messages are never touched. |
 
 #### Duration format (`delete time`)
 
@@ -564,7 +569,7 @@ prefix is prepended to the prompt so the LLM knows they are available.
 .venv/bin/python -m pytest tests/test_admin.py -v  # one file
 ```
 
-**All tests must pass before any commit. Currently: 371 tests, 0 failures.**
+**All tests must pass before any commit. Currently: 377 tests, 0 failures.**
 
 ### Test file naming
 

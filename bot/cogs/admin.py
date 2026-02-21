@@ -7,8 +7,8 @@
 #   ban <user>             — Ban a user from using the bot (admins only).
 #   unban <user>           — Unban a previously banned user (admins only).
 #   delete response        — Delete consecutive bot messages until a human message.
-#   delete count <N>       — Delete the N most recent messages (admins only).
-#   delete time <duration> — Delete messages from the last <duration> (admins only).
+#   delete count <N>       — Delete the N most recent bot messages (admins only).
+#   delete time <duration> — Delete bot messages from the last <duration> (admins only).
 #
 # All commands are gated behind the admin allowed-user list.
 
@@ -222,24 +222,34 @@ class AdminCog(commands.Cog):
     async def _delete_response(
         self, message: discord.Message, _command: str
     ) -> None:
-        """Delete the most recent consecutive bot messages then this command.
+        """Delete the most recent consecutive bot messages.
 
-        Scans channel history backwards.  Every bot-authored message found
-        before the first human-authored message is collected for deletion,
-        along with the triggering command message itself.
+        Scans channel history backwards.  Every message authored by *this bot*
+        found before the first non-bot message is collected for deletion.
+        The user's command message is never deleted.
         """
         if not is_allowed(message.author.id):
             await self._deny(message)
             return
 
-        to_delete: list[discord.Message] = [message]
+        to_delete: list[discord.Message] = []
         async for msg in message.channel.history(limit=100, before=message):
-            if msg.author.bot:
+            if msg.author.id == self.bot.user.id:
                 to_delete.append(msg)
             else:
                 break
 
-        await _bulk_delete(message.channel, to_delete)
+        if not to_delete:
+            await message.channel.send("ℹ️ No bot messages found to delete.")
+            return
+
+        try:
+            await _bulk_delete(message.channel, to_delete)
+        except discord.Forbidden:
+            await message.channel.send(
+                "⛔ I don't have **Manage Messages** permission in this channel."
+            )
+            return
         log(
             f"[Admin] delete response: {len(to_delete)} message(s) deleted"
             f" by {message.author} (id={message.author.id})",
@@ -249,9 +259,12 @@ class AdminCog(commands.Cog):
     async def _delete_count(
         self, message: discord.Message, command: str
     ) -> None:
-        """Delete up to N recent messages, including this command message.
+        """Delete up to N recent bot messages.
 
         Usage: ``delete count <N>``  (N must be a positive integer)
+
+        Only messages authored by this bot are deleted.  The user's
+        command message and all other users' messages are left untouched.
         """
         if not is_allowed(message.author.id):
             await self._deny(message)
@@ -276,10 +289,27 @@ class AdminCog(commands.Cog):
             await message.channel.send("⚠️ Count must be at least 1.")
             return
 
-        # n + 1 so the command message itself is also purged.
-        deleted = await message.channel.purge(limit=n + 1)
+        # Scan history and collect only bot-authored messages.
+        to_delete: list[discord.Message] = []
+        async for msg in message.channel.history(limit=200, before=message):
+            if msg.author.id == self.bot.user.id:
+                to_delete.append(msg)
+                if len(to_delete) >= n:
+                    break
+
+        if not to_delete:
+            await message.channel.send("ℹ️ No bot messages found to delete.")
+            return
+
+        try:
+            await _bulk_delete(message.channel, to_delete)
+        except discord.Forbidden:
+            await message.channel.send(
+                "⛔ I don't have **Manage Messages** permission in this channel."
+            )
+            return
         log(
-            f"[Admin] delete count {n}: {len(deleted)} message(s) deleted"
+            f"[Admin] delete count {n}: {len(to_delete)} message(s) deleted"
             f" by {message.author} (id={message.author.id})",
             LogLevel.INFO,
         )
@@ -287,12 +317,15 @@ class AdminCog(commands.Cog):
     async def _delete_time(
         self, message: discord.Message, command: str
     ) -> None:
-        """Delete all messages sent within the last <duration>.
+        """Delete bot messages sent within the last <duration>.
 
         Usage: ``delete time <duration>``
         Duration examples: ``1h``, ``30m``, ``1h30m``, ``2h1m30s``, ``1m1h``.
         Supports any combination of ``h`` (hours), ``m`` (minutes),
         ``s`` (seconds) in any order.
+
+        Only messages authored by this bot are deleted.  User messages
+        are left untouched.
         """
         if not is_allowed(message.author.id):
             await self._deny(message)
@@ -316,7 +349,17 @@ class AdminCog(commands.Cog):
             return
 
         cutoff = discord.utils.utcnow() - datetime.timedelta(seconds=seconds)
-        deleted = await message.channel.purge(limit=500, after=cutoff)
+        bot_id = self.bot.user.id
+        try:
+            deleted = await message.channel.purge(
+                limit=500, after=cutoff,
+                check=lambda msg: msg.author.id == bot_id,
+            )
+        except discord.Forbidden:
+            await message.channel.send(
+                "⛔ I don't have **Manage Messages** permission in this channel."
+            )
+            return
         log(
             f"[Admin] delete time {duration_str}: {len(deleted)} message(s) deleted"
             f" by {message.author} (id={message.author.id})",
