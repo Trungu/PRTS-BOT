@@ -2,22 +2,25 @@
 from settings import BOT_PREFIX, PREFIX_SMART_CHARS, PREFIX_CASE_SENSITIVE
 
 
-def _build_prefix_variants(prefix: str, smart_chars: list[str], case_sensitive: bool) -> list[str]:
+def _build_prefix_variants(prefixes: list[str], smart_chars: list[str], case_sensitive: bool) -> list[str]:
     """
-    Build all valid prefix variants from the base prefix and smart punctuation/space characters.
-    Each smart char is appended after the prefix (e.g. 'prts ', 'prts, ', 'prts. ').
-    The bare prefix itself is also included.
+    Build all valid prefix variants from the base prefix(es) and smart punctuation/space characters.
+    Each smart char is appended after each prefix (e.g. 'prts ', 'prts, ', 'prts. ').
+    The bare prefix itself is also included for each.
     """
-    base = prefix if case_sensitive else prefix.lower()
+    variants: list[str] = []
 
-    # Always include bare prefix
-    variants = [base]
+    for prefix in prefixes:
+        base = prefix if case_sensitive else prefix.lower()
 
-    for char in smart_chars:
-        # Each smart char forms: prefix + char + (optional trailing space already in char or not)
-        variant = base + char
-        if variant not in variants:
-            variants.append(variant)
+        # Always include bare prefix
+        if base not in variants:
+            variants.append(base)
+
+        for char in smart_chars:
+            variant = base + char
+            if variant not in variants:
+                variants.append(variant)
 
     # Sort longest-first so 'bot, ' is tried before bare 'bot'.
     # Without this, 'bot, hello' would match 'bot' first and pass

@@ -47,19 +47,15 @@ LLM_MODEL = get_env_var("LLM_MODEL", required=False)
 # Bot prefix
 # ---------------------------------------------------------------------------
 
-# The trigger word users type before a command (e.g. 'bot').
-# Defaults to 'bot' if not set in .env.
-BOT_PREFIX: str = get_env_var("BOT_PREFIX", required=False) or "bot"
+# The trigger word(s) users type before a command. Multiple prefixes are supported.
+BOT_PREFIX: list[str] = ["gemma"]
 
-# Pipe-separated list of suffixes that are also accepted after the prefix.
-# e.g. " |, |. " allows: 'prts hello', 'prts, hello', 'prts. hello'
-# Defaults to a plain space, comma+space, and period+space.
-_smart_chars_raw: str = get_env_var("PREFIX_SMART_CHARS", required=False) or " |, |. "
-PREFIX_SMART_CHARS: list[str] = [c for c in _smart_chars_raw.split("|") if c != ""]
+# Suffixes that are also accepted after the prefix.
+# e.g. [" ", ", ", ". "] allows: 'gemma hello', 'gemma, hello', 'gemma. hello'
+PREFIX_SMART_CHARS: list[str] = [" ", ", ", ". "]
 
 # Whether the prefix match is case-sensitive.
-# Defaults to False (case-insensitive), so 'BOT hello' works the same as 'bot hello'.
-PREFIX_CASE_SENSITIVE: bool = (get_env_var("PREFIX_CASE_SENSITIVE", required=False) or "false").strip().lower() == "true"
+PREFIX_CASE_SENSITIVE: bool = False
 
 # ---------------------------------------------------------------------------
 # KaTeX / math renderer
@@ -83,12 +79,11 @@ KATEX_DPI: int = 200
 
 # If True, tool-call notification messages are sent as silent Discord messages
 # (suppress notifications — the bell-with-slash icon). Users still see them.
-# Set TOOLCALL_SILENT=true in .env to enable.
-TOOLCALL_SILENT: bool = (get_env_var("TOOLCALL_SILENT", required=False) or "false").strip().lower() == "true"
+TOOLCALL_SILENT: bool = True
 
 # If True, EVERY message the bot sends (replies, tool notices, errors) is silent.
-# Overrides TOOLCALL_SILENT. Set GLOBAL_SILENT=true in .env to enable.
-GLOBAL_SILENT: bool = (get_env_var("GLOBAL_SILENT", required=False) or "false").strip().lower() == "true"
+# Overrides TOOLCALL_SILENT.
+GLOBAL_SILENT: bool = False
 
 # ---------------------------------------------------------------------------
 # Smart message cutoff
@@ -98,8 +93,7 @@ GLOBAL_SILENT: bool = (get_env_var("GLOBAL_SILENT", required=False) or "false").
 # sentence, word) rather than a hard character-count chop.
 # If False, replies are still safely split at 2000 chars (no crash), just
 # without trying to find a clean break point.
-# Set SMART_CUTOFF=false in .env to disable.
-SMART_CUTOFF: bool = (get_env_var("SMART_CUTOFF", required=False) or "true").strip().lower() == "true"
+SMART_CUTOFF: bool = True
 
 
 

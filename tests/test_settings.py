@@ -1,5 +1,3 @@
-import importlib
-
 import pytest
 import settings
 
@@ -17,19 +15,12 @@ def test_get_env_var_optional_missing_returns_none(monkeypatch: pytest.MonkeyPat
     assert settings.get_env_var("OPTIONAL_VAR", required=False) is None
 
 
-def test_prefix_and_silent_flags_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DISCORD_TOKEN", "token")
-    monkeypatch.setenv("LLM_API_KEY", "key")
-    monkeypatch.setenv("BOT_PREFIX", "prts")
-    monkeypatch.setenv("PREFIX_SMART_CHARS", " |, |. ")
-    monkeypatch.setenv("PREFIX_CASE_SENSITIVE", "true")
-    monkeypatch.setenv("TOOLCALL_SILENT", "true")
-    monkeypatch.setenv("GLOBAL_SILENT", "false")
-
-    reloaded = importlib.reload(settings)
-
-    assert reloaded.BOT_PREFIX == "prts"
-    assert reloaded.PREFIX_SMART_CHARS == [" ", ", ", ". "]
-    assert reloaded.PREFIX_CASE_SENSITIVE is True
-    assert reloaded.TOOLCALL_SILENT is True
-    assert reloaded.GLOBAL_SILENT is False
+def test_config_values_have_correct_types() -> None:
+    assert isinstance(settings.BOT_PREFIX, list)
+    assert all(isinstance(p, str) for p in settings.BOT_PREFIX)
+    assert len(settings.BOT_PREFIX) > 0
+    assert isinstance(settings.PREFIX_SMART_CHARS, list)
+    assert all(isinstance(c, str) for c in settings.PREFIX_SMART_CHARS)
+    assert isinstance(settings.PREFIX_CASE_SENSITIVE, bool)
+    assert isinstance(settings.TOOLCALL_SILENT, bool)
+    assert isinstance(settings.GLOBAL_SILENT, bool)
