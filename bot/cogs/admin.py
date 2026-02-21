@@ -6,13 +6,17 @@
 #   admin off              — Disable admin-only mode (caller must be in admin.txt).
 #   ban <user>             — Ban a user from using the bot (admins only).
 #   unban <user>           — Unban a previously banned user (admins only).
+#   delete response        — Delete consecutive bot messages until a human message.
+#   delete count <N>       — Delete the N most recent messages (admins only).
+#   delete time <duration> — Delete messages from the last <duration> (admins only).
 #
 # All commands are gated behind the admin allowed-user list.
 
 from __future__ import annotations
 
+import datetime
 import re
-from typing import cast
+from typing import Any, cast
 
 import discord
 from discord.ext import commands
@@ -50,16 +54,62 @@ def _parse_user_id(text: str) -> int | None:
         return None
 
 
+def _parse_duration(text: str) -> int | None:
+    """Parse a compact duration string into total seconds.
+
+    Accepts any combination of ``h`` (hours), ``m`` (minutes), and ``s``
+    (seconds) in any order.  Examples::
+
+        "1h"       → 3600
+        "30m"      → 1800
+        "1h30m"    → 5400
+        "1m1h"     → 3660
+        "2h1m30s"  → 7290
+
+    Returns the total number of seconds, or ``None`` if the string is empty,
+    unparseable, or resolves to zero seconds.
+    """
+    text = text.strip()
+    matches = re.findall(r"(\d+)([hms])", text)
+    if not matches:
+        return None
+    # Verify the entire string was consumed — rejects formats like "5:00".
+    if "".join(f"{n}{u}" for n, u in matches) != text:
+        return None
+    _UNIT_SECONDS: dict[str, int] = {"h": 3600, "m": 60, "s": 1}
+    total = sum(int(n) * _UNIT_SECONDS[u] for n, u in matches)
+    return total if total > 0 else None
+
+
+async def _bulk_delete(channel: Any, messages: list[discord.Message]) -> None:
+    """Delete *messages*, falling back to individual deletes for single-item batches.
+
+    ``channel.delete_messages`` requires 2–100 items.  This helper handles
+    the edge cases transparently.
+    """
+    if not messages:
+        return
+    for i in range(0, len(messages), 100):
+        batch = messages[i : i + 100]
+        if len(batch) == 1:
+            await batch[0].delete()
+        else:
+            await channel.delete_messages(batch)
+
+
 class AdminCog(commands.Cog):
     """Commands for managing admin-only mode."""
 
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
-        bot.register_command("admin only", self._admin_only)
-        bot.register_command("admin on",   self._admin_only)  # alias
-        bot.register_command("admin off",  self._admin_off)
-        bot.register_command("ban",        self._ban)
-        bot.register_command("unban",      self._unban)
+        bot.register_command("admin only",      self._admin_only)
+        bot.register_command("admin on",         self._admin_only)  # alias
+        bot.register_command("admin off",        self._admin_off)
+        bot.register_command("ban",              self._ban)
+        bot.register_command("unban",            self._unban)
+        bot.register_command("delete response",  self._delete_response)
+        bot.register_command("delete count",     self._delete_count)
+        bot.register_command("delete time",      self._delete_time)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -166,6 +216,110 @@ class AdminCog(commands.Cog):
         await message.channel.send(f"✅ User `{user_id}` has been unbanned.")
         log(
             f"[Admin] User {user_id} unbanned by {message.author} (id={message.author.id})",
+            LogLevel.INFO,
+        )
+
+    async def _delete_response(
+        self, message: discord.Message, _command: str
+    ) -> None:
+        """Delete the most recent consecutive bot messages then this command.
+
+        Scans channel history backwards.  Every bot-authored message found
+        before the first human-authored message is collected for deletion,
+        along with the triggering command message itself.
+        """
+        if not is_allowed(message.author.id):
+            await self._deny(message)
+            return
+
+        to_delete: list[discord.Message] = [message]
+        async for msg in message.channel.history(limit=100, before=message):
+            if msg.author.bot:
+                to_delete.append(msg)
+            else:
+                break
+
+        await _bulk_delete(message.channel, to_delete)
+        log(
+            f"[Admin] delete response: {len(to_delete)} message(s) deleted"
+            f" by {message.author} (id={message.author.id})",
+            LogLevel.INFO,
+        )
+
+    async def _delete_count(
+        self, message: discord.Message, command: str
+    ) -> None:
+        """Delete up to N recent messages, including this command message.
+
+        Usage: ``delete count <N>``  (N must be a positive integer)
+        """
+        if not is_allowed(message.author.id):
+            await self._deny(message)
+            return
+
+        parts = command.strip().split(None, 2)
+        if len(parts) < 3:
+            await message.channel.send(
+                "Usage: `delete count <N>` — e.g. `delete count 10`"
+            )
+            return
+
+        try:
+            n = int(parts[2])
+        except ValueError:
+            await message.channel.send(
+                "⚠️ `N` must be a whole number, e.g. `delete count 10`."
+            )
+            return
+
+        if n < 1:
+            await message.channel.send("⚠️ Count must be at least 1.")
+            return
+
+        # n + 1 so the command message itself is also purged.
+        deleted = await message.channel.purge(limit=n + 1)
+        log(
+            f"[Admin] delete count {n}: {len(deleted)} message(s) deleted"
+            f" by {message.author} (id={message.author.id})",
+            LogLevel.INFO,
+        )
+
+    async def _delete_time(
+        self, message: discord.Message, command: str
+    ) -> None:
+        """Delete all messages sent within the last <duration>.
+
+        Usage: ``delete time <duration>``
+        Duration examples: ``1h``, ``30m``, ``1h30m``, ``2h1m30s``, ``1m1h``.
+        Supports any combination of ``h`` (hours), ``m`` (minutes),
+        ``s`` (seconds) in any order.
+        """
+        if not is_allowed(message.author.id):
+            await self._deny(message)
+            return
+
+        parts = command.strip().split(None, 2)
+        if len(parts) < 3:
+            await message.channel.send(
+                "Usage: `delete time <duration>` — e.g. `delete time 1h`,"
+                " `delete time 30m`, `delete time 1h30m`"
+            )
+            return
+
+        duration_str = parts[2].strip()
+        seconds = _parse_duration(duration_str)
+        if seconds is None:
+            await message.channel.send(
+                "⚠️ Invalid duration. Use combinations of `h`, `m`, `s`"
+                " — e.g. `1h`, `30m`, `1h30m`, `2h1m30s`."
+            )
+            return
+
+        cutoff = discord.utils.utcnow() - datetime.timedelta(seconds=seconds)
+        deleted = await message.channel.purge(limit=500, after=cutoff)
+        log(
+            f"[Admin] delete time {duration_str}: {len(deleted)} message(s) deleted"
+            f" by {message.author} (id={message.author.id})",
             LogLevel.INFO,
         )
 

@@ -360,7 +360,7 @@ checked in `tests/test_tool_registry.py`.
 |---|---|
 | `admin.txt` | Whitelist of Discord user IDs (snowflake integers). One per line. Lines starting with `#` and blank lines are ignored. |
 | `utils/admin.py` | State machine. Single source of truth for `_admin_only` flag and `_allowed_ids` set. |
-| `bot/cogs/admin.py` | Commands: `admin only` and `admin off`. Both gated behind `is_allowed()`. |
+| `bot/cogs/admin.py` | Commands: `admin only`, `admin off`, `ban`, `unban`, `delete response`, `delete count`, `delete time`. All gated behind `is_allowed()`. |
 | `bot/client.py` | Enforces the gate in `on_message()`. |
 
 ### Key functions in `utils/admin.py`
@@ -399,6 +399,40 @@ When `admin only` is issued, the cog calls `reload_allowed_users()` **before**
 setting the flag. This ensures any edits made to `admin.txt` since startup are
 picked up immediately. If you add logic that depends on the allowed list at
 lock-down time, call `reload_allowed_users()` first.
+
+### Delete commands
+
+Three message-deletion commands are registered by `AdminCog`.  All require the
+caller to be listed in `admin.txt`.
+
+| Command | Behaviour |
+|---|---|
+| `delete response` | Scans history backwards from the command message. Deletes every consecutive **bot** message until the first human message is reached, then stops. Also deletes the command message itself. |
+| `delete count <N>` | Purges the last N messages plus the command message (`channel.purge(limit=N+1)`). N must be a positive integer. |
+| `delete time <duration>` | Purges up to 500 messages sent within the last `<duration>` (`channel.purge(limit=500, after=cutoff)`). |
+
+#### Duration format (`delete time`)
+
+Parsed by `_parse_duration()` in `bot/cogs/admin.py`.  Accepts any combination
+of `h` (hours), `m` (minutes), `s` (seconds) in **any order**.
+
+```
+1h        → 3 600 s
+30m       → 1 800 s
+1h30m     → 5 400 s
+1m1h      → 3 660 s   (any order is fine)
+2h1m30s   → 7 290 s
+```
+
+Returns `None` (rejected) if the string is empty, contains characters other
+than digits + `h`/`m`/`s`, or resolves to zero seconds.  Colon-style formats
+like `5:00` are explicitly rejected.
+
+#### `_bulk_delete(channel, messages)`
+
+Module-level async helper in `bot/cogs/admin.py`.  Handles Discord's
+2–100-message requirement for `delete_messages`: single-item lists call
+`message.delete()` directly; larger lists are sent in batches of 100.
 
 ---
 
@@ -530,11 +564,21 @@ prefix is prepended to the prompt so the LLM knows they are available.
 .venv/bin/python -m pytest tests/test_admin.py -v  # one file
 ```
 
-**All tests must pass before any commit. Currently: 337 tests, 0 failures.**
+**All tests must pass before any commit. Currently: 371 tests, 0 failures.**
 
 ### Test file naming
 
 One test file per module: `test_<module_name>.py`. Place in `tests/`.
+
+For large modules with clearly distinct layers it is acceptable to split into
+multiple files using a `test_<module>_<layer>.py` naming scheme. The current
+example is the admin system:
+
+| File | What it covers |
+|---|---|
+| `tests/test_admin_utils.py` | `utils/admin.py` pure-function layer: `load_admin_file`, `reload_allowed_users`, `is_allowed`, `set_admin_only`, `is_admin_only`, `_save_state`/`load_state`, `ban_user`/`unban_user`/`is_banned`, banned-IDs persistence |
+| `tests/test_admin_cog.py` | `bot/cogs/admin.py` cog handlers + `Bot.on_message` integration: `_parse_user_id`, all command handlers, admin gate, ban gate |
+| `tests/test_admin_delete.py` | Delete-message commands: `_parse_duration`, `_delete_response`, `_delete_count`, `_delete_time` |
 
 ### `conftest.py`
 
