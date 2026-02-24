@@ -200,6 +200,13 @@ def chat(
                     f"Maximum tool-call limit ({MAX_TOOL_CALLS}) reached but the "
                     f"model did not return a text reply."
                 )
+            if finish_reason == "length":
+                # The model hit the output token limit mid-reply and produced no
+                # usable content.  Report clearly instead of dumping the raw response.
+                raise ValueError(
+                    "The model hit the output token limit (max_tokens) without "
+                    "producing a reply. Try a shorter prompt or increase max_tokens."
+                )
             raise ValueError(f"Unexpected API response shape: {data}")
 
         return content.strip()

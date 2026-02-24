@@ -1,6 +1,7 @@
 # bot/client.py — Bot subclass with cog auto-loading and lifecycle hooks.
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Awaitable, Callable
 import discord
@@ -8,6 +9,15 @@ from discord.ext import commands
 
 from utils.logger import log, LogLevel
 from utils.prefix_handler import get_command
+from utils.admin import is_admin_only, is_allowed, is_banned
+from utils.crisis_detector import detect_crisis, CRISIS_RESPONSE
+from utils.rate_limiter import (
+    check_rate_limit,
+    RateLimitResult,
+    WARNING_MESSAGE,
+    RATE_LIMITED_MESSAGE,
+    COOLDOWN_MESSAGE,
+)
 
 # Type alias for a command handler: receives a Message and the stripped command string.
 CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
@@ -51,6 +61,8 @@ class Bot(commands.Bot):
         self._command_handlers: dict[str, CommandHandler] = {}
         # Optional catch-all for unrecognised commands (typically the LLM cog).
         self._llm_handler: LLMHandler | None = None
+        # Serialises concurrent LLM requests so responses never interleave.
+        self._llm_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Handler registration (called by cogs in their __init__)
@@ -85,9 +97,38 @@ class Bot(commands.Bot):
         if message.author.bot:
             return
 
+        # Crisis / distress gate — runs on ALL messages, no prefix required.
+        # Sends emergency resources immediately and then continues normal
+        # processing so any legitimate command is still handled.
+        if detect_crisis(message.content):
+            await message.channel.send(CRISIS_RESPONSE)
+
         command = get_command(message.content)
         if command is None:
             return
+
+        # Admin-only gate: reject non-admins when the mode is active.
+        if is_admin_only() and not is_allowed(message.author.id):
+            await message.channel.send("⛔ Admin-only mode is active.")
+            return
+
+        # Ban gate: reject banned users (admins bypass this).
+        if is_banned(message.author.id) and not is_allowed(message.author.id):
+            await message.channel.send("⛔ You have been banned from using this bot.")
+            return
+
+        # Rate-limit gate: admins bypass rate limiting entirely.
+        if not is_allowed(message.author.id):
+            rl_result = check_rate_limit(message.author.id)
+            if rl_result == RateLimitResult.COOLDOWN:
+                await message.channel.send(COOLDOWN_MESSAGE)
+                return
+            if rl_result == RateLimitResult.RATE_LIMITED:
+                await message.channel.send(RATE_LIMITED_MESSAGE)
+                return
+            if rl_result == RateLimitResult.WARNING:
+                await message.channel.send(WARNING_MESSAGE)
+                # Do NOT return — the message is still processed after the warning.
 
         cmd = command.lower().strip()
 
@@ -99,8 +140,11 @@ class Bot(commands.Bot):
                 return
 
         # Nothing matched — hand off to the LLM fallback.
+        # The lock ensures requests are processed one at a time so concurrent
+        # users' responses never interleave with each other.
         if self._llm_handler is not None:
-            await self._llm_handler(message, command)
+            async with self._llm_lock:
+                await self._llm_handler(message, command)
         else:
             log(f"[Bot] No handler for command: {command!r}", LogLevel.WARNING)
 

@@ -6,14 +6,21 @@ import json
 import os
 import re
 from contextlib import suppress
+from typing import cast
 
 import discord
 from discord.ext import commands
 
+from bot.client import Bot
 from utils.logger import log, LogLevel
-from utils.prompts import SYSTEM_PROMPT
+from utils.prompts import SYSTEM_PROMPT, contains_prompt_leak
 from tools.llm_api import chat, MAX_TOOL_CALLS
 from tools.toolcalls.code_runner import get_manager as _get_sandbox_manager
+from tools.toolcalls.safety_responder import (
+    SAFETY_RESPONSE_TAG,
+    CRISIS_RESPONSE as _CRISIS_RESPONSE,
+    PR_DEFLECTION_RESPONSE as _PR_DEFLECTION_RESPONSE,
+)
 from tools import katex_formatter
 import settings
 
@@ -38,6 +45,16 @@ def _should_silent_toolcall() -> bool:
 
 
 _DISCORD_MAX = 2000
+
+# Regex that strips any safety-sentinel lines the LLM may echo in its final
+# text reply.  The sentinel is meant to be handled silently by on_tool_call;
+# if it leaks into the reply it must be removed before the text is sent.
+# Discord also renders __word__ as underlined text, so even a partial leak
+# would corrupt the message visually.
+_SAFETY_SENTINEL_RE: re.Pattern[str] = re.compile(
+    rf"\[{re.escape(SAFETY_RESPONSE_TAG)}=[^\]]*\][^\n]*\n?",
+    re.IGNORECASE,
+)
 
 
 def _split_smart(text: str, limit: int = _DISCORD_MAX) -> list[str]:
@@ -90,6 +107,7 @@ async def _send_reply_with_math(
     reply: str,
     *,
     force_silent: bool = False,
+    reply_to: discord.Message | None = None,
 ) -> None:
     """Send *reply* to *channel*, rendering embedded LaTeX blocks as PNG images.
 
@@ -99,6 +117,10 @@ async def _send_reply_with_math(
     via :mod:`tools.katex_formatter` and sent as a Discord file attachment so
     it displays inline.  If rendering fails the raw expression is sent as a
     fenced code block instead.
+
+    If *reply_to* is given, the very first chunk (text or image) is sent as a
+    Discord reply to that message so the context is visually linked in the
+    channel.  All subsequent chunks are sent as regular channel messages.
     """
     segments = katex_formatter.parse_math_segments(reply)
 
@@ -109,6 +131,8 @@ async def _send_reply_with_math(
             LogLevel.DEBUG,
         )
 
+    _replied = False  # True once the first chunk has been sent as a Discord reply
+
     for seg in segments:
         if seg["type"] == "text":
             if settings.SMART_CUTOFF:
@@ -117,17 +141,31 @@ async def _send_reply_with_math(
                 chunks = _split_hard(seg["content"])
             for chunk in chunks:
                 if chunk.strip():
-                    await _send(channel, chunk, force_silent=force_silent)
+                    if reply_to is not None and not _replied:
+                        _replied = True
+                        kwargs: dict = {"content": chunk}
+                        if _should_silent_all() or force_silent:
+                            kwargs["silent"] = True
+                        await reply_to.reply(**kwargs)
+                    else:
+                        await _send(channel, chunk, force_silent=force_silent)
         else:
             expr = seg["expression"]
             try:
                 png_path = await asyncio.to_thread(katex_formatter.render, expr)
                 try:
                     disc_file = discord.File(str(png_path))
-                    kwargs: dict = {"file": disc_file}
-                    if _should_silent_all() or force_silent:
-                        kwargs["silent"] = True
-                    await channel.send(**kwargs)
+                    if reply_to is not None and not _replied:
+                        _replied = True
+                        kwargs = {"file": disc_file}
+                        if _should_silent_all() or force_silent:
+                            kwargs["silent"] = True
+                        await reply_to.reply(**kwargs)
+                    else:
+                        kwargs = {"file": disc_file}
+                        if _should_silent_all() or force_silent:
+                            kwargs["silent"] = True
+                        await channel.send(**kwargs)
                 finally:
                     katex_formatter.cleanup(png_path)
             except Exception as exc:
@@ -135,14 +173,21 @@ async def _send_reply_with_math(
                     f"[LLM] LaTeX render failed for {expr!r}: {exc}",
                     LogLevel.ERROR,
                 )
-                # Fall back to a fenced code block so the expression is still readable.
-                await _send(channel, f"```\n{expr}\n```", force_silent=force_silent)
+                if reply_to is not None and not _replied:
+                    _replied = True
+                    kwargs = {"content": f"```\n{expr}\n```"}
+                    if _should_silent_all() or force_silent:
+                        kwargs["silent"] = True
+                    await reply_to.reply(**kwargs)
+                else:
+                    # Fall back to a fenced code block so the expression is still readable.
+                    await _send(channel, f"```\n{expr}\n```", force_silent=force_silent)
 
 
 class LLM(commands.Cog):
     """Commands that interact with the language model."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: Bot) -> None:
         self.bot = bot
 
         # Register as the catch-all fallback — only receives messages that no
@@ -258,6 +303,25 @@ class LLM(commands.Cog):
                 )
                 return
 
+            # ── Safety response: detect [__safety_response__=<type>] tag ─────
+            # send_crisis_response / send_pr_deflection embed this tag so the
+            # cog sends the correct pre-written message directly to Discord
+            # without exposing the raw sentinel string as a tool notice.
+            safety_match = re.search(
+                rf"\[{re.escape(SAFETY_RESPONSE_TAG)}=([^\]]+)\]", result
+            )
+            if safety_match:
+                response_type = safety_match.group(1)
+                if response_type.startswith("crisis"):
+                    safety_msg = _CRISIS_RESPONSE
+                else:
+                    safety_msg = _PR_DEFLECTION_RESPONSE
+                asyncio.run_coroutine_threadsafe(
+                    _send(message.channel, safety_msg),
+                    loop,
+                )
+                return  # suppress normal tool notice
+
             # ── Normal tool-call notice ───────────────────────────────────────
             args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
             notice = f"🔧 **{tool_name}**({args_str}) → `{result}`"
@@ -284,21 +348,47 @@ class LLM(commands.Cog):
                     f"[LLM] Response received for {message.author} "
                     f"| {len(reply)} chars"
                 )
+
+                # Guard: block any reply that echoes the system prompt.
+                if contains_prompt_leak(reply):
+                    log(
+                        f"[LLM] Prompt leak detected in response for "
+                        f"{message.author} — reply blocked",
+                        LogLevel.WARNING,
+                    )
+                    await message.reply("⚠️ I can't share that information.")
+                    return
+
+                # Guard: strip any safety sentinel tags the LLM may have
+                # echoed verbatim in its text reply.  The tool call already
+                # sent the correct safety message; echoing the raw sentinel
+                # would expose internal tags to the Discord channel.
+                reply = _SAFETY_SENTINEL_RE.sub("", reply).strip()
+                if not reply:
+                    # The tool call said everything that needed saying.
+                    return
+
             except Exception as exc:
                 log(
                     f"[LLM] API error for {message.author} "
                     f"| prompt: {prompt!r} | {type(exc).__name__}: {exc}",
                     LogLevel.ERROR,
                 )
-                await _send(message.channel, f"⚠️ The LLM returned an error: `{exc}`")
+                # Truncate the exception message so it always fits in a Discord
+                # message — raw API responses can be thousands of characters.
+                err_str = str(exc)
+                _ERR_LIMIT = _DISCORD_MAX - 40  # leave room for the prefix + backticks
+                if len(err_str) > _ERR_LIMIT:
+                    err_str = err_str[:_ERR_LIMIT] + "…"
+                await message.reply(f"⚠️ The LLM returned an error: `{err_str}`")
                 return
 
             # Send the reply inside the typing context so the indicator stays
             # active during the full reply delivery (including LaTeX rendering).
             # Text is split at natural boundaries; math is rendered inline.
-            await _send_reply_with_math(message.channel, reply)
+            await _send_reply_with_math(message.channel, reply, reply_to=message)
 
 
 async def setup(bot: commands.Bot) -> None:
     """Entry point called by Bot.load_extension."""
-    await bot.add_cog(LLM(bot))
+    await bot.add_cog(LLM(cast(Bot, bot)))

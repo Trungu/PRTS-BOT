@@ -15,6 +15,10 @@ IMAGE_NAME = "ai_sandbox_image"
 CONTAINER_NAME = "ai_sandbox_env"
 DOCKERFILE_PATH = "Dockerfile"
 WORKSPACE_PATH = "/workspace"
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_WORKSPACE_HOST_DIR = os.path.abspath(
+    os.path.join(_THIS_DIR, "..", "..", "sandbox_workspace")
+)
 
 def run_command(cmd, description, show_output=True):
     """Run a shell command and handle errors."""
@@ -242,17 +246,21 @@ def build_docker_image():
 def start_new_container():
     """Start the new container with the updated image."""
     print(f"\n🚀 Starting new container '{CONTAINER_NAME}'...")
+    os.makedirs(_WORKSPACE_HOST_DIR, exist_ok=True)
     
     run_cmd = [
         "docker", "run", "-d", "-t",
         "--name", CONTAINER_NAME,
+        "--runtime=runsc",
         "--network", "none",
         "--memory", "1024m",
+        "--memory-swap", "1024m",
         "--cpus", "2",
         "--cap-drop=ALL",
         "--read-only",
+        "--security-opt", "no-new-privileges:true",
         "--tmpfs", "/tmp",
-        "--tmpfs", f"{WORKSPACE_PATH}:exec,mode=1777",
+        "-v", f"{_WORKSPACE_HOST_DIR}:{WORKSPACE_PATH}",
         IMAGE_NAME, "bash"
     ]
     

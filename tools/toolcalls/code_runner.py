@@ -233,8 +233,9 @@ def get_workspace_file(filename: str) -> str:
         return "Error: filename must not be empty."
 
     # Prevent path traversal outside /workspace.
-    container_path = os.path.normpath(f"/workspace/{clean}")
-    if not container_path.startswith("/workspace"):
+    workspace_root = "/workspace"
+    container_path = os.path.normpath(f"{workspace_root}/{clean}")
+    if container_path != workspace_root and not container_path.startswith(f"{workspace_root}/"):
         return "Error: path traversal outside /workspace is not allowed."
 
     try:

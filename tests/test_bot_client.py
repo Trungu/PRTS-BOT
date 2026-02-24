@@ -17,6 +17,7 @@ class DummyChannel:
 class DummyAuthor:
     def __init__(self, bot: bool = False) -> None:
         self.bot = bot
+        self.id: int = 0
 
 
 class DummyMessage:
@@ -69,6 +70,9 @@ def test_on_message_dispatches_longest_match(monkeypatch: pytest.MonkeyPatch) ->
     bot.register_command("clear history", clear_history_handler)
 
     monkeypatch.setattr("bot.client.get_command", lambda _: "clear history all")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
 
     asyncio.run(bot.on_message(cast(Any, msg)))
 
@@ -91,6 +95,9 @@ def test_on_message_falls_back_to_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     bot.set_llm_handler(llm_handler)
     bot.process_commands = fake_process_commands  # type: ignore[assignment]
     monkeypatch.setattr("bot.client.get_command", lambda _: "ask something")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
 
     asyncio.run(bot.on_message(cast(Any, msg)))
 
@@ -111,3 +118,237 @@ def test_load_cogs_loads_py_extensions(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(bot._load_cogs())
 
     assert loaded == ["bot.cogs.general", "bot.cogs.llm"]
+
+
+# ---------------------------------------------------------------------------
+# Crisis detector integration
+# ---------------------------------------------------------------------------
+
+def test_crisis_message_without_prefix_sends_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A distress message that has no bot prefix still receives the crisis response."""
+    bot = Bot()
+    # Message has no bot prefix — get_command returns None — but crisis must
+    # still be detected and responded to before the prefix check.
+    msg = DummyMessage("I want to kill myself")
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: None)
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: True)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert len(msg.channel.sent) == 1
+    content, _ = msg.channel.sent[0]
+    assert "988" in content or "741741" in content or "iasp.info" in content
+
+
+def test_crisis_message_with_prefix_sends_resources_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A distress message that also has a bot prefix receives crisis resources
+    AND has the command dispatched normally."""
+    bot = Bot()
+    msg = DummyMessage("gemma, kill myself please help")
+
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("kill", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "kill")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: True)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    # Crisis response was sent
+    assert len(msg.channel.sent) >= 1
+    content, _ = msg.channel.sent[0]
+    assert "988" in content or "741741" in content or "iasp.info" in content
+    # Command was also dispatched
+    assert dispatched == ["kill"]
+
+
+def test_no_crisis_response_for_normal_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Normal messages do not trigger the crisis response."""
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert msg.channel.sent == []
+
+# ---------------------------------------------------------------------------
+# Rate limiter integration
+# ---------------------------------------------------------------------------
+
+def test_rate_limit_warning_still_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the rate limiter returns WARNING, the warning is sent but the
+    command is still dispatched."""
+    from utils.rate_limiter import RateLimitResult
+
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: False)
+    monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: RateLimitResult.WARNING)
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    # Warning was sent.
+    assert any("slow down" in c[0].lower() for c in msg.channel.sent if c[0])
+    # Command was still dispatched.
+    assert dispatched == ["hello"]
+
+
+def test_rate_limit_rejects_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the rate limiter returns RATE_LIMITED, the message is rejected."""
+    from utils.rate_limiter import RateLimitResult
+
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: False)
+    monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: RateLimitResult.RATE_LIMITED)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    # Rejection message was sent.
+    assert any("rate limit" in c[0].lower() for c in msg.channel.sent if c[0])
+    # Command was NOT dispatched.
+    assert dispatched == []
+
+
+def test_rate_limit_cooldown_rejects_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the rate limiter returns COOLDOWN, the message is rejected."""
+    from utils.rate_limiter import RateLimitResult
+
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: False)
+    monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: RateLimitResult.COOLDOWN)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    # Cooldown message was sent.
+    assert any("rate-limited" in c[0].lower() for c in msg.channel.sent if c[0])
+    # Command was NOT dispatched.
+    assert dispatched == []
+
+
+def test_admins_bypass_rate_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admins (is_allowed=True) bypass the rate limiter entirely."""
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+    msg.author.id = 42
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: uid == 42)
+    # Even if check_rate_limit would reject, admins skip it.
+    monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: (_ for _ in ()).throw(
+        AssertionError("check_rate_limit should not be called for admins")
+    ))
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert dispatched == ["hello"]
+
+
+def test_rate_limit_allowed_processes_normally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the rate limiter returns ALLOWED, no extra messages are sent."""
+    from utils.rate_limiter import RateLimitResult
+
+    bot = Bot()
+    msg = DummyMessage("gemma, hello")
+    dispatched = []
+
+    async def handler(message, command):
+        dispatched.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: False)
+    monkeypatch.setattr("bot.client.check_rate_limit", lambda uid: RateLimitResult.ALLOWED)
+
+    async def fake_process_commands(message):
+        pass
+
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    # No rate-limit messages sent.
+    assert msg.channel.sent == []
+    # Command was dispatched.
+    assert dispatched == ["hello"]

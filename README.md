@@ -20,5 +20,5 @@ cp .env.example .env
 edit your data in .env
 run the bot
 ```bash
-main.py
+python main.py
 ```

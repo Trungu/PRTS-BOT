@@ -1,0 +1,17 @@
+# admin.txt — Discord user IDs allowed to use the bot when admin-only mode is active.
+#
+# FORMAT
+# ------
+# One Discord user ID (snowflake integer) per line.
+# Lines starting with '#' and blank lines are ignored.
+#
+# HOW TO FIND YOUR USER ID
+# -------------------------
+# 1. Open Discord Settings → Advanced → enable "Developer Mode".
+# 2. Right-click your username anywhere in Discord.
+# 3. Click "Copy User ID".
+#
+# EXAMPLE
+# -------
+# 123456789012345678
+# 987654321098765432

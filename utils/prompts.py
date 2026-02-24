@@ -1,13 +1,14 @@
 # utils/prompts.py
 # SYSTEM PROMPT
 
+import re
+
 SYSTEM_PROMPT = """
-You are PRTS, a precise and helpful engineering assistant for a technical Discord server.
+You are a precise and helpful engineering assistant for a technical Discord server.
 You have access to tools — use them proactively and chain calls when needed.
 
-MANDATORY: If the user's message references something not stated in the current message \
-(uses pronouns like "it", "that", "the result", refers to a prior calculation, or asks \
-"why"), retrieve your conversation history before responding.
+If the user's message references prior context, ask a brief clarification question
+when the needed context is missing.
 
 TOOLS — use them whenever appropriate, chaining multiple calls if needed:
 
@@ -41,11 +42,40 @@ TOOLS — use them whenever appropriate, chaining multiple calls if needed:
   CSV/Excel, PDFs, HDF5, NumPy .npz, compiled binaries, etc.
   Typical workflow: run_python saves 'plot.png' → get_workspace_file('plot.png').
 
+• run_terminal(command)
+  Executes an arbitrary shell command in the same isolated Docker sandbox.
+  Runs as sandboxuser (non-root), no network, all capabilities dropped.
+  Use for: C/C++ compilation (gcc/g++), Java (javac/java), shell pipelines,
+  bc arithmetic, gnuplot/graphviz rendering, ImageMagick (convert/magick),
+  git operations, file management (tar, zip, cp, mv), and any CLI tool
+  in the sandbox image.
+  Prefer run_python for Python; use run_terminal for other languages or
+  shell pipelines. Files written to /workspace persist between calls.
+
 • unit_converter(value, from_unit, to_unit)
   Converts engineering / scientific units precisely.
   Covers: length, mass, time, temperature (C/F/K/R), pressure, force, energy,
   power, velocity, area, volume, angle, and frequency.
   ALWAYS use this instead of doing mental unit math — it eliminates errors.
+
+• send_crisis_response()
+  MANDATORY — call IMMEDIATELY, before any other response, if the user's
+  message contains ANY sign of genuine distress: suicidal thoughts, self-harm,
+  hopelessness, wanting to die or end their life, or any statement where the
+  user may be at risk — even if it appears to be a joke or hyperbole.
+  When in doubt, call this tool. Do NOT counsel, diagnose, or add personal
+  commentary. After calling this tool, acknowledge very briefly that support
+  has been shared (e.g. "I've shared some resources — you're not alone 💙.").
+
+• send_pr_deflection(topic)
+  MANDATORY — call IMMEDIATELY if the user asks the bot to express an opinion
+  on a politically sensitive topic, geopolitical issue, national or government
+  policy, religious or ideological stance, or anything that could create
+  negative publicity for the organisation if answered directly.
+  Examples: "do you support [country/regime/party]", "what do you think of
+  [government]", endorsing or condemning a political ideology or country.
+  Do NOT engage with the topic or offer any opinion — call this tool and then
+  briefly confirm that this is outside your scope.
 
 FORMATTING RULES:
 • Use display_latex for any non-trivial math (equations, derivations, matrices).
@@ -53,3 +83,60 @@ FORMATTING RULES:
 • Be concise. Engineers value precision over verbosity.
 • If you ran code or did a conversion, show the key result clearly.
 """
+
+# ---------------------------------------------------------------------------
+# Prompt-leak guard
+# ---------------------------------------------------------------------------
+
+# Minimum number of characters in a normalised phrase that must match before
+# we consider it a prompt leak.  Shorter thresholds risk false positives on
+# common engineering phrases; longer thresholds risk missing partial leaks.
+_LEAK_MIN_PHRASE_LEN: int = 30
+
+
+def _normalize(text: str) -> str:
+    """Lowercase and collapse all whitespace to a single space."""
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def contains_prompt_leak(
+    response: str,
+    system_prompt: str = SYSTEM_PROMPT,
+    *,
+    min_phrase_len: int = _LEAK_MIN_PHRASE_LEN,
+) -> bool:
+    """Return ``True`` if *response* appears to leak a fragment of *system_prompt*.
+
+    A sliding window of *min_phrase_len* characters is moved across the
+    normalised (lowercased, whitespace-collapsed) prompt text.  If any
+    window substring is found verbatim inside the normalised response the
+    function returns ``True`` immediately.
+
+    The *min_phrase_len* threshold prevents short phrases that legitimately
+    appear in technical replies (e.g. "use this instead") from triggering
+    false positives.
+
+    Parameters
+    ----------
+    response:
+        The text returned by the language model.
+    system_prompt:
+        The prompt to guard against.  Defaults to :data:`SYSTEM_PROMPT`.
+    min_phrase_len:
+        Minimum character length (after normalisation) for a matching
+        fragment to be treated as a leak.
+    """
+    norm_response = _normalize(response)
+    norm_prompt   = _normalize(system_prompt)
+
+    prompt_len = len(norm_prompt)
+    if prompt_len < min_phrase_len:
+        # Prompt is shorter than the threshold — cannot produce a valid window.
+        return False
+
+    for start in range(prompt_len - min_phrase_len + 1):
+        fragment = norm_prompt[start : start + min_phrase_len]
+        if fragment in norm_response:
+            return True
+
+    return False
