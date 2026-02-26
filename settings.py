@@ -25,6 +25,29 @@ def get_env_var(name: str, required: bool = True) -> Optional[str]:
         raise RuntimeError(f"Required environment variable '{name}' is not set.")
     return value
 
+
+def _parse_pipe_list(value: str | None, default: list[str]) -> list[str]:
+    """Parse a pipe-delimited env var (e.g. 'a|b|c') into a list."""
+    if value is None:
+        return default
+    parts = value.split("|")
+    # Keep whitespace tokens like " " because they are meaningful for
+    # PREFIX_SMART_CHARS; only drop truly empty tokens.
+    parsed = [part for part in parts if part != ""]
+    return parsed or default
+
+
+def _parse_bool(value: str | None, default: bool) -> bool:
+    """Parse common true/false env strings with a fallback default."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
 # ---------------------------------------------------------------------------
 # Discord
 # ---------------------------------------------------------------------------
@@ -48,14 +71,23 @@ LLM_MODEL = get_env_var("LLM_MODEL", required=False)
 # ---------------------------------------------------------------------------
 
 # The trigger word(s) users type before a command. Multiple prefixes are supported.
-BOT_PREFIX: list[str] = ["gemma"]
+# Required: define BOT_PREFIX in .env (use "|" to separate multiple prefixes).
+BOT_PREFIX: list[str] = _parse_pipe_list(get_env_var("BOT_PREFIX"), [])
+if not BOT_PREFIX:
+    raise RuntimeError("Required environment variable 'BOT_PREFIX' is empty.")
 
 # Suffixes that are also accepted after the prefix.
 # e.g. [" ", ", ", ". "] allows: 'gemma hello', 'gemma, hello', 'gemma. hello'
-PREFIX_SMART_CHARS: list[str] = [" ", ", ", ". "]
+PREFIX_SMART_CHARS: list[str] = _parse_pipe_list(
+    get_env_var("PREFIX_SMART_CHARS", required=False),
+    [" ", ", ", ". "],
+)
 
 # Whether the prefix match is case-sensitive.
-PREFIX_CASE_SENSITIVE: bool = False
+PREFIX_CASE_SENSITIVE: bool = _parse_bool(
+    get_env_var("PREFIX_CASE_SENSITIVE", required=False),
+    False,
+)
 
 # ---------------------------------------------------------------------------
 # KaTeX / math renderer
@@ -104,6 +136,4 @@ CLIENT_SECRET = get_env_var("CLIENT_SECRET", required=False)
 OAUTH_BASE_URL = get_env_var("OAUTH_BASE_URL", required=False)
 OAUTH_REDIRECT_URI = get_env_var("OAUTH_REDIRECT_URI", required=False)
 GCAL_DB_PATH = get_env_var("GCAL_DB_PATH", required=False)
-
-
 
