@@ -2,6 +2,9 @@
 # MACOS
 .DS_Store
 
+# Miscellaneous
+.VSCodeCounter
+
 # ------- PYTHON BOILERPLATE -------
 # Byte-compiled / optimized / DLL files
 __pycache__/

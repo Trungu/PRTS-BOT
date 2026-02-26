@@ -101,5 +101,15 @@ GLOBAL_SILENT: bool = (get_env_var("GLOBAL_SILENT", required=False) or "false").
 # Set SMART_CUTOFF=false in .env to disable.
 SMART_CUTOFF: bool = (get_env_var("SMART_CUTOFF", required=False) or "true").strip().lower() == "true"
 
+# ---------------------------------------------------------------------------
+# Google Calendar / OAuth
+# ---------------------------------------------------------------------------
+
+CLIENT_ID = get_env_var("CLIENT_ID", required=False)
+CLIENT_SECRET = get_env_var("CLIENT_SECRET", required=False)
+OAUTH_BASE_URL = get_env_var("OAUTH_BASE_URL", required=False)
+OAUTH_REDIRECT_URI = get_env_var("OAUTH_REDIRECT_URI", required=False)
+GCAL_DB_PATH = get_env_var("GCAL_DB_PATH", required=False)
+
 
 

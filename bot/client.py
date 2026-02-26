@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from typing import Awaitable, Callable
 import discord
+import settings
 from discord.ext import commands
 
 from utils.logger import log, LogLevel
@@ -117,6 +118,13 @@ class Bot(commands.Bot):
         context, and ``load_extension`` is a coroutine.
         """
         await self._load_cogs()
+
+         # What commands exist locally (before syncing)?
+        local = [c.name for c in self.tree.get_commands()]
+        log(f"[Slash] Local tree commands: {local}")
+
+        synced = await self.tree.sync()
+        log(f"[Slash] Synced global: {[c.name for c in synced]}")
 
     async def _load_cogs(self) -> None:
         """Discover and load every cog module in ``bot/cogs/``."""
