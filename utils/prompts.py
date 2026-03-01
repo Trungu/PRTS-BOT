@@ -82,6 +82,8 @@ TOOLS — use them whenever appropriate, chaining multiple calls if needed:
   You must convert natural-language time into ISO-8601 with timezone offset.
   If end time is missing, set a reasonable duration (default 60 minutes).
   If user asks for reminders, pass reminder_minutes (array of integers).
+  If user explicitly includes attendee emails, pass attendees as full emails.
+  Do NOT guess contacts from names; ask a follow-up if an email is missing.
 
 • gcal_find_events(discord_user_id, query, ...)
   Use to find event IDs before deleting/updating events if the user did not

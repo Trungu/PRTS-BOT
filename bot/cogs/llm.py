@@ -6,8 +6,9 @@ import json
 import os
 import re
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import cast
+from urllib.parse import unquote
 
 import discord
 from discord.ext import commands
@@ -17,6 +18,7 @@ from utils.logger import log, LogLevel
 from utils.prompts import SYSTEM_PROMPT, contains_prompt_leak
 from tools.llm_api import chat, MAX_TOOL_CALLS
 from tools.toolcalls.code_runner import get_manager as _get_sandbox_manager
+from tools.toolcalls import tool_registry as _tool_registry
 from tools.toolcalls.safety_responder import (
     SAFETY_RESPONSE_TAG,
     CRISIS_RESPONSE as _CRISIS_RESPONSE,
@@ -56,30 +58,40 @@ _SAFETY_SENTINEL_RE: re.Pattern[str] = re.compile(
     rf"\[{re.escape(SAFETY_RESPONSE_TAG)}=[^\]]*\][^\n]*\n?",
     re.IGNORECASE,
 )
+_GCAL_CONFLICT_TAG = "__gcal_conflict__"
+_GCAL_CONFLICT_RE: re.Pattern[str] = re.compile(
+    rf"\[{re.escape(_GCAL_CONFLICT_TAG)}=([^\]]+)\]"
+)
 
 
 def _format_iso_brief(iso_str: str | None) -> str:
     if not iso_str:
         return "N/A"
     try:
-        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
-        tz = dt.strftime("%z")
-        if tz:
-            tz = f"UTC{tz[:3]}:{tz[3:]}"
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00")).astimezone()
+        now_local = datetime.now().astimezone()
+        today = now_local.date()
+        tomorrow = (now_local + timedelta(days=1)).date()
+
+        if dt.date() == today:
+            day_label = "Today"
+        elif dt.date() == tomorrow:
+            day_label = "Tomorrow"
         else:
-            tz = "local"
-        return f"{dt.strftime('%Y-%m-%d %H:%M')} {tz}"
+            day_label = dt.strftime("%a, %b %d")
+        return f"{day_label} at {dt.strftime('%I:%M %p').lstrip('0')}"
     except Exception:
         return str(iso_str)
 
 
-def _extract_gcal_line_value(result: str, key: str) -> str | None:
-    # Parses tokens like "id=abc | title='X' | start=... | calendar=primary"
-    pattern = rf"(?:^|\|\s*){re.escape(key)}=([^|]+)"
-    match = re.search(pattern, result)
+def _extract_conflict_payload(result: str) -> dict | None:
+    match = _GCAL_CONFLICT_RE.search(result)
     if not match:
         return None
-    return match.group(1).strip().strip("'")
+    try:
+        return json.loads(unquote(match.group(1)))
+    except Exception:
+        return None
 
 
 def _split_smart(text: str, limit: int = _DISCORD_MAX) -> list[str]:
@@ -214,10 +226,86 @@ class LLM(commands.Cog):
 
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
+        # user_id -> {"payload": {...}, "expires_at": datetime}
+        self._pending_gcal_conflicts: dict[int, dict] = {}
 
         # Register as the catch-all fallback — only receives messages that no
         # other cog handler claimed, so it can never swallow a known command.
         bot.set_llm_handler(self._ask)
+
+    def _get_pending_conflict(self, user_id: int) -> dict | None:
+        row = self._pending_gcal_conflicts.get(user_id)
+        if not row:
+            return None
+        expires_at = row.get("expires_at")
+        if not isinstance(expires_at, datetime) or expires_at <= datetime.now(timezone.utc):
+            self._pending_gcal_conflicts.pop(user_id, None)
+            return None
+        return row.get("payload")
+
+    def _set_pending_conflict(self, user_id: int, payload: dict, *, ttl_minutes: int = 5) -> None:
+        self._pending_gcal_conflicts[user_id] = {
+            "payload": payload,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes),
+        }
+
+    def _clear_pending_conflict(self, user_id: int) -> None:
+        self._pending_gcal_conflicts.pop(user_id, None)
+
+    async def _resolve_gcal_conflict_action(self, user_id: int, payload: dict, action: str) -> tuple[str, str]:
+        request = dict(payload.get("request", {}))
+        request["discord_user_id"] = user_id
+
+        if action == "create_anyway":
+            request["allow_overlap"] = True
+        elif action == "move":
+            suggestions = payload.get("suggestions") or []
+            if not suggestions:
+                return (
+                    "No suggested free time slots were found in the next 24 hours.",
+                    "I could not move the event because no open slot was found in the next 24 hours.",
+                )
+            slot = suggestions[0]
+            request["start_iso"] = slot.get("start_iso")
+            request["end_iso"] = slot.get("end_iso")
+            request["allow_overlap"] = False
+        elif action == "cancel":
+            self._clear_pending_conflict(user_id)
+            return (
+                "Cancelled. I did not create the event.",
+                "No problem. I cancelled this request and did not create a new event.",
+            )
+        else:
+            return ("Unknown action.", "I could not resolve that action.")
+
+        result = await asyncio.to_thread(_tool_registry.TOOLS["gcal_add_event"], request)
+        self._clear_pending_conflict(user_id)
+        if action == "create_anyway":
+            friendly = "I've created the event for you, even with the overlap."
+        else:
+            friendly = "I've moved and created the event in the next available suggested slot."
+        return result, friendly
+
+    async def _maybe_resolve_conflict_from_text(self, message: discord.Message, prompt: str) -> bool:
+        payload = self._get_pending_conflict(message.author.id)
+        if not payload:
+            return False
+
+        text = prompt.lower().strip()
+        action: str | None = None
+        if any(k in text for k in ["create anyway", "do it anyway", "go ahead", "create it"]):
+            action = "create_anyway"
+        elif any(k in text for k in ["move", "reschedule"]):
+            action = "move"
+        elif any(k in text for k in ["cancel", "nevermind", "never mind", "stop"]):
+            action = "cancel"
+        else:
+            return False
+
+        result, friendly = await self._resolve_gcal_conflict_action(message.author.id, payload, action)
+        await message.reply(result)
+        await message.reply(friendly)
+        return True
 
     # ------------------------------------------------------------------
     # Handlers
@@ -225,12 +313,16 @@ class LLM(commands.Cog):
 
     async def _ask(self, message: discord.Message, prompt: str) -> None:
         """Send *prompt* to the LLM and reply with the response."""
+        if await self._maybe_resolve_conflict_from_text(message, prompt):
+            return
+
         log(
             f"[LLM] Prompt from {message.author} (#{message.channel}) "
             f"| {len(prompt)} chars: {prompt!r}"
         )
 
         loop = asyncio.get_running_loop()
+        state = {"handled_conflict_prompt": False}
 
         # ── Discord attachment → sandbox upload ───────────────────────────────
         # If the message has file attachments, upload each one to /workspace
@@ -291,19 +383,125 @@ class LLM(commands.Cog):
             """Called from the worker thread each time the LLM uses a tool."""
             log(f"[LLM] Tool call: {tool_name}({args}) → {result!r}", LogLevel.DEBUG)
 
+            if tool_name == "gcal_add_event":
+                conflict_payload = _extract_conflict_payload(result)
+                if conflict_payload is not None:
+                    state["handled_conflict_prompt"] = True
+                    async def _send_gcal_conflict() -> None:
+                        self._set_pending_conflict(message.author.id, conflict_payload, ttl_minutes=5)
+
+                        conflicts = conflict_payload.get("conflicts") or []
+                        suggestions = conflict_payload.get("suggestions") or []
+                        if conflicts:
+                            conflict_lines = "\n".join(
+                                f"• **{c.get('title', 'Untitled')}** at `{_format_iso_brief(c.get('start'))}`"
+                                for c in conflicts[:3]
+                            )
+                        else:
+                            conflict_lines = "• Existing overlapping events detected."
+
+                        if suggestions:
+                            first = suggestions[0]
+                            suggestion_line = (
+                                f"Suggested move: `{_format_iso_brief(first.get('start_iso'))}` "
+                                f"to `{_format_iso_brief(first.get('end_iso'))}`"
+                            )
+                        else:
+                            suggestion_line = "No free suggestion found in the next 24 hours."
+
+                        embed = discord.Embed(
+                            title="Calendar Conflict Detected",
+                            description=(
+                                "I noticed this event overlaps with an existing event.\n\n"
+                                f"{conflict_lines}\n\n"
+                                f"{suggestion_line}\n\n"
+                                "Choose what to do next:"
+                            ),
+                            color=discord.Color.gold(),
+                        )
+                        embed.add_field(
+                            name="Choices",
+                            value="`Create anyway`  •  `Move new event`  •  `Cancel`",
+                            inline=False,
+                        )
+                        embed.set_footer(text="You can click a button or type: create anyway / move / cancel")
+
+                        cog = self
+
+                        class ConflictView(discord.ui.View):
+                            def __init__(self, owner_id: int, payload: dict):
+                                super().__init__(timeout=300)
+                                self.owner_id = owner_id
+                                self.payload = payload
+
+                            async def _finish(self, interaction: discord.Interaction, status_text: str) -> None:
+                                for item in self.children:
+                                    if isinstance(item, discord.ui.Button):
+                                        item.disabled = True
+                                embed.set_footer(text=status_text)
+                                if interaction.message:
+                                    with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                                        await interaction.message.edit(view=self, embed=embed)
+                                self.stop()
+
+                            async def interaction_check(self, interaction: discord.Interaction) -> bool:
+                                if interaction.user.id != self.owner_id:
+                                    await interaction.response.send_message(
+                                        "This conflict prompt is not for you.",
+                                        ephemeral=True,
+                                    )
+                                    return False
+                                return True
+
+                            @discord.ui.button(label="Create anyway", style=discord.ButtonStyle.danger)
+                            async def create_anyway(self, interaction: discord.Interaction, _button: discord.ui.Button):
+                                await interaction.response.defer(ephemeral=True)
+                                out, friendly = await cog._resolve_gcal_conflict_action(self.owner_id, self.payload, "create_anyway")
+                                await interaction.followup.send(friendly, ephemeral=True)
+                                await message.reply(out)
+                                await self._finish(interaction, "Resolved: create anyway")
+
+                            @discord.ui.button(label="Move new event", style=discord.ButtonStyle.primary)
+                            async def move_event(self, interaction: discord.Interaction, _button: discord.ui.Button):
+                                await interaction.response.defer(ephemeral=True)
+                                out, friendly = await cog._resolve_gcal_conflict_action(self.owner_id, self.payload, "move")
+                                await interaction.followup.send(friendly, ephemeral=True)
+                                await message.reply(out)
+                                await self._finish(interaction, "Resolved: moved new event")
+
+                            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+                            async def cancel_event(self, interaction: discord.Interaction, _button: discord.ui.Button):
+                                await interaction.response.defer(ephemeral=True)
+                                out, friendly = await cog._resolve_gcal_conflict_action(self.owner_id, self.payload, "cancel")
+                                await interaction.followup.send(friendly, ephemeral=True)
+                                await message.reply(out)
+                                await self._finish(interaction, "Resolved: cancelled")
+
+                        kwargs: dict = {"embed": embed, "view": ConflictView(message.author.id, conflict_payload)}
+                        if _should_silent_all() or _should_silent_toolcall():
+                            kwargs["silent"] = True
+                        await message.channel.send(**kwargs)
+
+                    asyncio.run_coroutine_threadsafe(_send_gcal_conflict(), loop)
+                    return
+
             if tool_name == "gcal_add_event" and "Error:" not in result:
                 async def _send_gcal_add_embed() -> None:
                     title = str(args.get("title", "Untitled event"))
                     start_iso = args.get("start_iso")
                     end_iso = args.get("end_iso")
                     reminder_vals = args.get("reminder_minutes") or []
-                    calendar_id = _extract_gcal_line_value(result, "calendar") or str(args.get("calendar_id", "primary"))
-                    event_id = _extract_gcal_line_value(result, "id") or "unknown"
+                    attendee_vals = args.get("attendees") or []
 
                     if isinstance(reminder_vals, list) and reminder_vals:
                         reminder_text = ", ".join(str(v) for v in reminder_vals) + " minutes before"
                     else:
                         reminder_text = "Default / not set"
+                    attendee_text = (
+                        ", ".join(str(v) for v in attendee_vals)
+                        if isinstance(attendee_vals, list) and attendee_vals
+                        else ""
+                    )
 
                     embed = discord.Embed(
                         title="Calendar Update",
@@ -312,17 +510,14 @@ class LLM(commands.Cog):
                             "Let me know if you want to edit anything.\n\n"
                             "```ansi\n\u001b[1;92m+ Event added to Google Calendar\u001b[0m\n```"
                         ),
-                        color=discord.Color.from_rgb(46, 204, 113),
+                        color=discord.Color.from_rgb(78, 203, 113),
                     )
                     embed.add_field(name="Title", value=title, inline=False)
                     embed.add_field(name="Start", value=_format_iso_brief(start_iso), inline=True)
                     embed.add_field(name="End", value=_format_iso_brief(end_iso), inline=True)
                     embed.add_field(name="Reminder", value=reminder_text, inline=False)
-                    embed.add_field(
-                        name="Meta",
-                        value=f"`calendar={calendar_id}`  `event_id={event_id}`",
-                        inline=False,
-                    )
+                    if attendee_text:
+                        embed.add_field(name="Attendees", value=attendee_text, inline=False)
                     embed.timestamp = datetime.now().astimezone()
 
                     kwargs: dict = {"embed": embed}
@@ -452,6 +647,11 @@ class LLM(commands.Cog):
                 # sent the correct safety message; echoing the raw sentinel
                 # would expose internal tags to the Discord channel.
                 reply = _SAFETY_SENTINEL_RE.sub("", reply).strip()
+                reply = _GCAL_CONFLICT_RE.sub("", reply).strip()
+                if state["handled_conflict_prompt"]:
+                    # Conflict embed/buttons already provided canonical choices.
+                    # Suppress model prose to avoid contradictory guidance.
+                    return
                 if not reply:
                     # The tool call said everything that needed saying.
                     return

@@ -86,6 +86,31 @@ class GCal(commands.GroupCog, group_name="gcal"):
             return selected[0]
         return "primary"
 
+    @staticmethod
+    def _with_prts_event_metadata(description: str | None) -> tuple[str, dict[str, str]]:
+        """Return visible + private metadata that marks PRTS-created events.
+
+        The marker in ``description`` gives human provenance directly in Google Calendar.
+        ``extendedProperties.private`` stores machine-readable metadata for future
+        automation (safe filtering of bot-created events, migration/versioning, and
+        idempotent updates) without exposing extra internals to attendees.
+        """
+        marker = "[Added by PRTS bot]"
+        base = (description or "").strip()
+        if marker.lower() in base.lower():
+            merged_description = base
+        elif base:
+            merged_description = f"{base}\n\n{marker}"
+        else:
+            merged_description = marker
+
+        private_meta = {
+            "prts_created": "true",
+            "prts_source": "discord_bot",
+            "prts_created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        return merged_description, private_meta
+
 
     @app_commands.command(name="connect", description="Connect your Google Calendar")
     async def connect(self, interaction: discord.Interaction) -> None:
@@ -173,8 +198,9 @@ class GCal(commands.GroupCog, group_name="gcal"):
             "start": {"dateTime": start_dt.isoformat()},
             "end": {"dateTime": end_dt.isoformat()},
         }
-        if description:
-            event_body["description"] = description
+        marked_description, private_meta = self._with_prts_event_metadata(description)
+        event_body["description"] = marked_description
+        event_body["extendedProperties"] = {"private": private_meta}
         if location:
             event_body["location"] = location
         if reminder_overrides is not None:

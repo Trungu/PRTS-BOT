@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from calendar import monthrange
 import re
 import os
+import json
+from urllib.parse import quote
 
 from tools.toolcalls.calculator import calculator, TOOL_DEFINITION as _CALC_DEF
 from tools.toolcalls.code_runner import (
@@ -22,6 +24,8 @@ from tools.toolcalls.safety_responder import (
 
 _GCAL_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
+_EMAIL_RE = re.compile(r"(?i)^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+_GCAL_CONFLICT_TAG = "__gcal_conflict__"
 
 
 def _parse_iso_datetime(raw: str) -> datetime:
@@ -88,6 +92,66 @@ def _default_calendar(discord_user_id: int, calendar_id: str | None) -> str:
     return _selected_or_primary(discord_user_id)[0]
 
 
+def _with_prts_event_metadata(description: str | None) -> tuple[str, dict[str, str]]:
+    """Return visible + private metadata that marks PRTS-created events.
+
+    Purpose:
+    - Keep a small human-visible provenance marker in the event description.
+    - Persist structured bot metadata in ``extendedProperties.private`` so
+      automation can reliably detect/manage bot-created events later without
+      parsing display text.
+    """
+    marker = "[Added by PRTS bot]"
+    base = (description or "").strip()
+    if marker.lower() in base.lower():
+        merged_description = base
+    elif base:
+        merged_description = f"{base}\n\n{marker}"
+    else:
+        merged_description = marker
+
+    private_meta = {
+        "prts_created": "true",
+        "prts_source": "discord_bot",
+        "prts_created_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    return merged_description, private_meta
+
+
+def _normalize_and_validate_attendees(attendees: list[str] | None) -> list[str]:
+    """Normalize attendee emails and reject malformed values.
+
+    Note: calendar APIs do not provide a reliable pre-send "mailbox exists"
+    check for arbitrary emails. We validate strict email syntax here and let
+    Google handle invite delivery outcomes.
+    """
+    if not attendees:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+
+    for raw in attendees:
+        email = str(raw).strip().lower()
+        if not email:
+            continue
+        if not _EMAIL_RE.match(email):
+            invalid.append(email)
+            continue
+        if email not in seen:
+            seen.add(email)
+            cleaned.append(email)
+
+    if invalid:
+        shown = ", ".join(invalid[:5])
+        raise ValueError(
+            f"Invalid attendee email format: {shown}. "
+            "Use explicit full emails like name@example.com."
+        )
+    return cleaned
+
+
 def _event_start(ev: dict) -> str:
     start = ev.get("start", {})
     return start.get("dateTime") or start.get("date") or "unknown"
@@ -97,6 +161,112 @@ def _event_line(ev: dict, calendar_id: str) -> str:
     event_id = ev.get("id", "unknown")
     title = ev.get("summary") or "Untitled"
     return f"id={event_id} | title={title!r} | start={_event_start(ev)} | calendar={calendar_id}"
+
+
+def _event_interval(ev: dict) -> tuple[datetime, datetime] | None:
+    start = ev.get("start", {})
+    end = ev.get("end", {})
+    raw_start = start.get("dateTime") or start.get("date")
+    raw_end = end.get("dateTime") or end.get("date")
+    if not raw_start or not raw_end:
+        return None
+
+    if "T" in raw_start:
+        s = datetime.fromisoformat(raw_start.replace("Z", "+00:00"))
+    else:
+        s = datetime.fromisoformat(f"{raw_start}T00:00:00+00:00")
+    if "T" in raw_end:
+        e = datetime.fromisoformat(raw_end.replace("Z", "+00:00"))
+    else:
+        e = datetime.fromisoformat(f"{raw_end}T00:00:00+00:00")
+    return s, e
+
+
+def _is_overlap(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
+    return a_start < b_end and b_start < a_end
+
+
+def _find_overlaps(service, calendar_id: str, start_dt: datetime, end_dt: datetime) -> list[dict]:
+    # Buffer a day both sides to catch all-day and timezone-crossing events.
+    time_min = (start_dt - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    time_max = (end_dt + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+
+    items = (
+        service.events()
+        .list(
+            calendarId=calendar_id,
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=250,
+        )
+        .execute()
+        .get("items", [])
+    )
+
+    conflicts: list[dict] = []
+    for ev in items:
+        if ev.get("status") == "cancelled":
+            continue
+        interval = _event_interval(ev)
+        if not interval:
+            continue
+        ev_start, ev_end = interval
+        if _is_overlap(start_dt, end_dt, ev_start, ev_end):
+            conflicts.append(ev)
+    return conflicts
+
+
+def _suggest_next_slots(
+    service,
+    calendar_id: str,
+    *,
+    requested_start: datetime,
+    duration: timedelta,
+    max_suggestions: int = 3,
+) -> list[tuple[datetime, datetime]]:
+    horizon_end = requested_start + timedelta(hours=24)
+    items = (
+        service.events()
+        .list(
+            calendarId=calendar_id,
+            timeMin=requested_start.isoformat().replace("+00:00", "Z"),
+            timeMax=horizon_end.isoformat().replace("+00:00", "Z"),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=250,
+        )
+        .execute()
+        .get("items", [])
+    )
+
+    busy: list[tuple[datetime, datetime]] = []
+    for ev in items:
+        if ev.get("status") == "cancelled":
+            continue
+        interval = _event_interval(ev)
+        if interval:
+            busy.append(interval)
+
+    suggestions: list[tuple[datetime, datetime]] = []
+    candidate = requested_start
+    for _ in range(96):  # up to 24h in 15-minute increments
+        candidate_end = candidate + duration
+        if candidate_end > horizon_end:
+            break
+        blocked = any(_is_overlap(candidate, candidate_end, b_start, b_end) for b_start, b_end in busy)
+        if not blocked:
+            suggestions.append((candidate, candidate_end))
+            if len(suggestions) >= max_suggestions:
+                break
+        candidate += timedelta(minutes=15)
+    return suggestions
+
+
+def _encode_conflict_payload(payload: dict) -> str:
+    encoded = quote(json.dumps(payload, separators=(",", ":")))
+    return f"[{_GCAL_CONFLICT_TAG}={encoded}]"
 
 
 def _find_events(
@@ -198,7 +368,9 @@ def gcal_add_event(
     description: str | None = None,
     location: str | None = None,
     reminder_minutes: list[int] | None = None,
+    attendees: list[str] | None = None,
     calendar_id: str | None = None,
+    allow_overlap: bool = False,
 ) -> str:
     service = _build_gcal_service(discord_user_id)
     start_dt = _parse_iso_datetime(start_iso)
@@ -212,16 +384,66 @@ def gcal_add_event(
         raise ValueError("end_iso must be later than start_iso.")
 
     target_calendar = _default_calendar(discord_user_id, calendar_id)
+    overlaps = _find_overlaps(service, target_calendar, start_dt, end_dt)
+    if overlaps and not allow_overlap:
+        duration = end_dt - start_dt
+        suggestions = _suggest_next_slots(
+            service,
+            target_calendar,
+            requested_start=end_dt,
+            duration=duration,
+            max_suggestions=3,
+        )
+        conflict_lines = [
+            {
+                "id": ev.get("id", "unknown"),
+                "title": ev.get("summary") or "Untitled",
+                "start": _event_start(ev),
+            }
+            for ev in overlaps[:5]
+        ]
+        suggestion_lines = [
+            {
+                "start_iso": s.isoformat(),
+                "end_iso": e.isoformat(),
+            }
+            for s, e in suggestions
+        ]
+        payload = {
+            "request": {
+                "discord_user_id": discord_user_id,
+                "title": title,
+                "start_iso": start_dt.isoformat(),
+                "end_iso": end_dt.isoformat(),
+                "description": description,
+                "location": location,
+                "reminder_minutes": reminder_minutes,
+                "attendees": attendees,
+                "calendar_id": target_calendar,
+            },
+            "calendar_id": target_calendar,
+            "conflicts": conflict_lines,
+            "suggestions": suggestion_lines,
+            "message": "Requested time overlaps with existing event(s).",
+        }
+        return (
+            f"{_encode_conflict_payload(payload)} "
+            "Overlap detected. Ask whether to create anyway, move the new event, or cancel."
+        )
+
     event_body: dict = {
         "summary": title,
         "start": {"dateTime": start_dt.isoformat()},
         "end": {"dateTime": end_dt.isoformat()},
     }
-
-    if description:
-        event_body["description"] = description
+    marked_description, private_meta = _with_prts_event_metadata(description)
+    event_body["description"] = marked_description
+    event_body["extendedProperties"] = {"private": private_meta}
     if location:
         event_body["location"] = location
+    attendee_emails = _normalize_and_validate_attendees(attendees)
+    if attendee_emails:
+        event_body["attendees"] = [{"email": email} for email in attendee_emails]
     if reminder_minutes is not None:
         clean = sorted({int(m) for m in reminder_minutes if int(m) >= 0})
         event_body["reminders"] = {
@@ -363,7 +585,16 @@ GCAL_ADD_EVENT_TOOL_DEFINITION: dict = {
                     "type": "array",
                     "items": {"type": "integer"},
                 },
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Invitee emails. Only include when explicitly provided by the user.",
+                },
                 "calendar_id": {"type": "string"},
+                "allow_overlap": {
+                    "type": "boolean",
+                    "description": "If true, creates event even when overlap is detected.",
+                },
             },
             "required": ["discord_user_id", "title", "start_iso"],
             "additionalProperties": False,
@@ -471,7 +702,9 @@ TOOLS: dict[str, Callable[[dict], str]] = {
                                 description=args.get("description"),
                                 location=args.get("location"),
                                 reminder_minutes=args.get("reminder_minutes"),
+                                attendees=args.get("attendees"),
                                 calendar_id=args.get("calendar_id"),
+                                allow_overlap=bool(args.get("allow_overlap", False)),
                             ),
     "gcal_find_events":     lambda args: gcal_find_events(
                                 discord_user_id=int(args["discord_user_id"]),

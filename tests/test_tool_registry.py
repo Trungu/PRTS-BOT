@@ -1,4 +1,5 @@
 from tools.toolcalls import tool_registry
+import pytest
 
 
 def test_tool_registry_has_calculator() -> None:
@@ -43,3 +44,17 @@ def test_send_pr_deflection_wrapper_callable() -> None:
     result = tool_registry.TOOLS["send_pr_deflection"]({"topic": "communist Russia"})
     assert "__safety_response__" in result
     assert "communist Russia" in result
+
+
+def test_normalize_and_validate_attendees_valid_and_deduped() -> None:
+    out = tool_registry._normalize_and_validate_attendees(
+        [" Alice@example.com ", "alice@example.com", "bob@example.org"]
+    )
+    assert out == ["alice@example.com", "bob@example.org"]
+
+
+def test_normalize_and_validate_attendees_invalid_raises() -> None:
+    with pytest.raises(ValueError):
+        tool_registry._normalize_and_validate_attendees(
+            ["not-an-email", "ok@example.com"]
+        )

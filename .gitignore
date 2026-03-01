@@ -2,6 +2,9 @@
 # MACOS
 .DS_Store
 
+# codex
+codex.md
+
 # Miscellaneous
 .VSCodeCounter
 sandbox_workspace/
@@ -9,6 +12,7 @@ sandbox_workspace/
 admin_state.json
 
 admin.txt
+features.txt
 
 # ------- PYTHON BOILERPLATE -------
 # Byte-compiled / optimized / DLL files
