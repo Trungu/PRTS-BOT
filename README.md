@@ -1,7 +1,9 @@
-## Project 170226 | Open-Source In-development Agentic AI Application
+## PRTS Discord Bot
+This is a collaborative project being worked on by me and a few friends
 
-Collaborative Development Work-in-Progress Project
+PRTS is a discord bot that aims to bring AI and agentic integrations to directly to discord.
 
+\
 more details to be posted later.
 
 To install.
