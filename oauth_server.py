@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from google_auth_oauthlib.flow import Flow
 from fastapi.responses import RedirectResponse
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 GOOGLE_CLIENT_ID = os.getenv("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("CLIENT_SECRET")

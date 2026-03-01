@@ -6,6 +6,7 @@ import json
 import os
 import re
 from contextlib import suppress
+from datetime import datetime
 from typing import cast
 
 import discord
@@ -55,6 +56,30 @@ _SAFETY_SENTINEL_RE: re.Pattern[str] = re.compile(
     rf"\[{re.escape(SAFETY_RESPONSE_TAG)}=[^\]]*\][^\n]*\n?",
     re.IGNORECASE,
 )
+
+
+def _format_iso_brief(iso_str: str | None) -> str:
+    if not iso_str:
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        tz = dt.strftime("%z")
+        if tz:
+            tz = f"UTC{tz[:3]}:{tz[3:]}"
+        else:
+            tz = "local"
+        return f"{dt.strftime('%Y-%m-%d %H:%M')} {tz}"
+    except Exception:
+        return str(iso_str)
+
+
+def _extract_gcal_line_value(result: str, key: str) -> str | None:
+    # Parses tokens like "id=abc | title='X' | start=... | calendar=primary"
+    pattern = rf"(?:^|\|\s*){re.escape(key)}=([^|]+)"
+    match = re.search(pattern, result)
+    if not match:
+        return None
+    return match.group(1).strip().strip("'")
 
 
 def _split_smart(text: str, limit: int = _DISCORD_MAX) -> list[str]:
@@ -210,7 +235,18 @@ class LLM(commands.Cog):
         # ── Discord attachment → sandbox upload ───────────────────────────────
         # If the message has file attachments, upload each one to /workspace
         # before the LLM call so the model can reference them immediately.
-        full_prompt = prompt
+        # Give the model concrete temporal/user context so it can correctly
+        # resolve phrases like "today at 5pm" when using calendar tools.
+        user_id = int(getattr(message.author, "id", 0))
+        now_local = datetime.now().astimezone()
+        full_prompt = (
+            "[System runtime context]\n"
+            f"- discord_user_id: {user_id}\n"
+            f"- current_datetime: {now_local.isoformat()}\n"
+            f"- current_date: {now_local.date().isoformat()}\n"
+            f"- timezone: {now_local.tzname() or 'local'}\n\n"
+            f"{prompt}"
+        )
         if message.attachments:
             uploaded: list[str] = []
             try:
@@ -248,12 +284,54 @@ class LLM(commands.Cog):
                 names = ", ".join(f"'{n}'" for n in uploaded)
                 full_prompt = (
                     f"[System: The following files were uploaded to /workspace "
-                    f"and are ready to use: {names}]\n\n{prompt}"
+                    f"and are ready to use: {names}]\n\n{full_prompt}"
                 )
 
         def on_tool_call(tool_name: str, args: dict, result: str) -> None:
             """Called from the worker thread each time the LLM uses a tool."""
             log(f"[LLM] Tool call: {tool_name}({args}) → {result!r}", LogLevel.DEBUG)
+
+            if tool_name == "gcal_add_event" and "Error:" not in result:
+                async def _send_gcal_add_embed() -> None:
+                    title = str(args.get("title", "Untitled event"))
+                    start_iso = args.get("start_iso")
+                    end_iso = args.get("end_iso")
+                    reminder_vals = args.get("reminder_minutes") or []
+                    calendar_id = _extract_gcal_line_value(result, "calendar") or str(args.get("calendar_id", "primary"))
+                    event_id = _extract_gcal_line_value(result, "id") or "unknown"
+
+                    if isinstance(reminder_vals, list) and reminder_vals:
+                        reminder_text = ", ".join(str(v) for v in reminder_vals) + " minutes before"
+                    else:
+                        reminder_text = "Default / not set"
+
+                    embed = discord.Embed(
+                        title="Calendar Update",
+                        description=(
+                            f"I've added your reminder for **{title}**. "
+                            "Let me know if you want to edit anything.\n\n"
+                            "```ansi\n\u001b[1;92m+ Event added to Google Calendar\u001b[0m\n```"
+                        ),
+                        color=discord.Color.from_rgb(46, 204, 113),
+                    )
+                    embed.add_field(name="Title", value=title, inline=False)
+                    embed.add_field(name="Start", value=_format_iso_brief(start_iso), inline=True)
+                    embed.add_field(name="End", value=_format_iso_brief(end_iso), inline=True)
+                    embed.add_field(name="Reminder", value=reminder_text, inline=False)
+                    embed.add_field(
+                        name="Meta",
+                        value=f"`calendar={calendar_id}`  `event_id={event_id}`",
+                        inline=False,
+                    )
+                    embed.timestamp = datetime.now().astimezone()
+
+                    kwargs: dict = {"embed": embed}
+                    if _should_silent_all() or _should_silent_toolcall():
+                        kwargs["silent"] = True
+                    await message.channel.send(**kwargs)
+
+                asyncio.run_coroutine_threadsafe(_send_gcal_add_embed(), loop)
+                return
 
             # ── File download: detect [__discord_file__=<path>] tag ───────────
             # get_workspace_file embeds this tag so the cog can send the file
@@ -323,7 +401,8 @@ class LLM(commands.Cog):
                 return  # suppress normal tool notice
 
             # ── Normal tool-call notice ───────────────────────────────────────
-            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            safe_args = {k: v for k, v in args.items() if k != "discord_user_id"}
+            args_str = ", ".join(f"{k}={v!r}" for k, v in safe_args.items())
             notice = f"🔧 **{tool_name}**({args_str}) → `{result}`"
             asyncio.run_coroutine_threadsafe(
                 _send(
@@ -332,6 +411,14 @@ class LLM(commands.Cog):
                 ),
                 loop,
             )
+
+        def tool_args_transform(tool_name: str, args: dict) -> dict:
+            # Never trust model-supplied identity for calendar actions.
+            if tool_name.startswith("gcal_"):
+                updated = dict(args)
+                updated["discord_user_id"] = user_id
+                return updated
+            return args
 
         async with message.channel.typing():
             try:
@@ -342,6 +429,7 @@ class LLM(commands.Cog):
                         full_prompt,
                         system_prompt=SYSTEM_PROMPT,
                         on_tool_call=on_tool_call,
+                        tool_args_transform=tool_args_transform,
                     ),
                 )
                 log(

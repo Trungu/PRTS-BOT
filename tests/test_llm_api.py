@@ -85,3 +85,44 @@ def test_chat_bad_shape_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValueError):
         llm_api.chat("hi")
+
+
+def test_chat_tool_args_transform_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_payload = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": {
+                                "name": "calculator",
+                                "arguments": json.dumps({"expression": "1+1"}),
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    second_payload = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "3"}}]
+    }
+    responses = [DummyResponse(first_payload), DummyResponse(second_payload)]
+
+    def fake_post(*args, **kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
+    monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setattr(llm_api.settings, "LLM_MODEL", "model-x")
+
+    result = llm_api.chat(
+        "calculate",
+        tool_args_transform=lambda name, args: {"expression": "1+2"} if name == "calculator" else args,
+    )
+
+    assert result == "3"

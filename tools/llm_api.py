@@ -59,6 +59,7 @@ def chat(
     timeout: int = 30,
     enable_tools: bool = True,
     on_tool_call: Callable[[str, dict, str], None] | None = None,
+    tool_args_transform: Callable[[str, dict], dict] | None = None,
 ) -> str:
     """Send a chat request and handle agentic tool-call loops automatically.
 
@@ -86,6 +87,11 @@ def chat(
         Receives ``(tool_name: str, args: dict, result: str)``.
         Use this to send Discord notifications from the calling coroutine via
         ``asyncio.run_coroutine_threadsafe``.
+    tool_args_transform:
+        Optional callable invoked before each tool executes.
+        Receives ``(tool_name: str, args: dict)`` and must return the args dict
+        that will be passed to the tool. Use this to inject trusted runtime
+        values (for example, authenticated user IDs).
 
     Returns
     -------
@@ -165,6 +171,15 @@ def chat(
                     fn_args = json.loads(tc["function"].get("arguments", "{}"))
                 except json.JSONDecodeError:
                     fn_args = {}
+                if tool_args_transform is not None:
+                    try:
+                        fn_args = dict(tool_args_transform(fn_name, dict(fn_args)))
+                    except Exception as exc:
+                        fn_args = {
+                            "__tool_args_transform_error__": (
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                        }
 
                 if fn_name in TOOLS:
                     try:

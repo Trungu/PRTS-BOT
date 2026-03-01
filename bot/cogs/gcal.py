@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # DISCORD IMPORTS
 import discord
@@ -21,7 +22,7 @@ from discord.ext import commands
 
 # CONFIG
 OAUTH_BASE_URL = os.getenv("OAUTH_BASE_URL")
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
@@ -48,6 +49,43 @@ class GCal(commands.GroupCog, group_name="gcal"):
 
         return "Unknown time"
 
+    @staticmethod
+    def _parse_iso_datetime(raw: str) -> datetime:
+        # Accept both "...Z" and full ISO-8601 offsets.
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("Datetime must include a timezone offset, e.g. +00:00 or Z.")
+        return parsed
+
+    @staticmethod
+    def _build_service(refresh_token: str):
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=TOKEN_URI,
+            client_id=os.environ["CLIENT_ID"],
+            client_secret=os.environ["CLIENT_SECRET"],
+            scopes=SCOPES,
+        )
+        creds.refresh(Request())
+        return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+    async def _get_service_for_user(self, discord_user_id: int):
+        rt = await asyncio.to_thread(get_refresh_token, discord_user_id)
+        if not rt:
+            return None, "You are not connected. Run `/gcal connect` first."
+        try:
+            service = await asyncio.to_thread(self._build_service, rt)
+            return service, None
+        except Exception as e:
+            return None, f"Failed to authenticate with Google Calendar: {e}"
+
+    async def _resolve_default_calendar(self, discord_user_id: int) -> str:
+        selected = await asyncio.to_thread(get_selected_calendars, discord_user_id)
+        if selected:
+            return selected[0]
+        return "primary"
+
 
     @app_commands.command(name="connect", description="Connect your Google Calendar")
     async def connect(self, interaction: discord.Interaction) -> None:
@@ -62,6 +100,242 @@ class GCal(commands.GroupCog, group_name="gcal"):
 
         link = f"Please connect your Google Calendar using this link: {OAUTH_BASE_URL.rstrip('/')}/auth?connect_id={connect_id}"
         await interaction.followup.send(link, ephemeral=True)
+
+
+    @app_commands.command(name="add_event", description="Add a Google Calendar event")
+    @app_commands.describe(
+        title="Event title",
+        start_iso="Start datetime ISO-8601 (e.g. 2026-03-03T15:00:00-06:00)",
+        end_iso="End datetime ISO-8601 (e.g. 2026-03-03T16:00:00-06:00)",
+        description="Optional description",
+        location="Optional location",
+        reminder_minutes="Optional reminder minutes before start (e.g. 10,60)",
+        calendar_id="Optional calendar ID (defaults to first selected or primary)",
+    )
+    async def add_event(
+        self,
+        interaction: discord.Interaction,
+        title: str,
+        start_iso: str,
+        end_iso: str,
+        description: str | None = None,
+        location: str | None = None,
+        reminder_minutes: str | None = None,
+        calendar_id: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            start_dt = self._parse_iso_datetime(start_iso)
+            end_dt = self._parse_iso_datetime(end_iso)
+            if end_dt <= start_dt:
+                await interaction.followup.send("`end_iso` must be after `start_iso`.", ephemeral=True)
+                return
+        except ValueError as e:
+            await interaction.followup.send(f"Invalid datetime: {e}", ephemeral=True)
+            return
+
+        reminder_overrides: list[dict] | None = None
+        if reminder_minutes:
+            try:
+                mins = sorted(
+                    {
+                        int(v.strip())
+                        for v in reminder_minutes.split(",")
+                        if v.strip()
+                    }
+                )
+            except ValueError:
+                await interaction.followup.send(
+                    "Invalid `reminder_minutes`. Use comma-separated integers like `10,60`.",
+                    ephemeral=True,
+                )
+                return
+
+            if not mins or any(m < 0 for m in mins):
+                await interaction.followup.send(
+                    "`reminder_minutes` must contain non-negative integers.",
+                    ephemeral=True,
+                )
+                return
+
+            reminder_overrides = [{"method": "popup", "minutes": m} for m in mins]
+
+        service, auth_error = await self._get_service_for_user(interaction.user.id)
+        if not service:
+            await interaction.followup.send(auth_error, ephemeral=True)
+            return
+
+        target_calendar = calendar_id or await self._resolve_default_calendar(interaction.user.id)
+
+        event_body = {
+            "summary": title,
+            "start": {"dateTime": start_dt.isoformat()},
+            "end": {"dateTime": end_dt.isoformat()},
+        }
+        if description:
+            event_body["description"] = description
+        if location:
+            event_body["location"] = location
+        if reminder_overrides is not None:
+            event_body["reminders"] = {"useDefault": False, "overrides": reminder_overrides}
+
+        def create_event():
+            return service.events().insert(calendarId=target_calendar, body=event_body).execute()
+
+        try:
+            created = await asyncio.to_thread(create_event)
+        except HttpError as e:
+            status = getattr(e.resp, "status", "unknown")
+            await interaction.followup.send(
+                f"Google Calendar rejected the request ({status}). "
+                "Reconnect with `/gcal connect` to grant write scope, then try again.",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(f"Failed to create event: {e}", ephemeral=True)
+            return
+
+        event_id = created.get("id", "unknown")
+        when = self._event_time_display(created)
+        await interaction.followup.send(
+            f"Created event ✅\nTitle: `{title}`\nWhen: {when}\nEvent ID: `{event_id}`\nCalendar: `{target_calendar}`",
+            ephemeral=True,
+        )
+
+
+    @app_commands.command(name="remove_event", description="Delete a Google Calendar event by event ID")
+    @app_commands.describe(
+        event_id="Event ID to delete (shown by /gcal test or /gcal add_event)",
+        calendar_id="Optional calendar ID (defaults to first selected or primary)",
+    )
+    async def remove_event(
+        self,
+        interaction: discord.Interaction,
+        event_id: str,
+        calendar_id: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        service, auth_error = await self._get_service_for_user(interaction.user.id)
+        if not service:
+            await interaction.followup.send(auth_error, ephemeral=True)
+            return
+
+        target_calendar = calendar_id or await self._resolve_default_calendar(interaction.user.id)
+
+        def delete_event():
+            return service.events().delete(calendarId=target_calendar, eventId=event_id).execute()
+
+        try:
+            await asyncio.to_thread(delete_event)
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            if status == 404:
+                await interaction.followup.send(
+                    f"No event found with ID `{event_id}` in `{target_calendar}`.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                f"Google Calendar rejected the request ({status or 'unknown'}). "
+                "Reconnect with `/gcal connect` to grant write scope, then try again.",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(f"Failed to remove event: {e}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            f"Deleted event ✅\nEvent ID: `{event_id}`\nCalendar: `{target_calendar}`",
+            ephemeral=True,
+        )
+
+
+    @app_commands.command(name="set_reminder", description="Set pop-up reminder minutes for an event")
+    @app_commands.describe(
+        event_id="Event ID to update",
+        reminder_minutes="Comma-separated minutes before event start (e.g. 10,30,60)",
+        calendar_id="Optional calendar ID (defaults to first selected or primary)",
+    )
+    async def set_reminder(
+        self,
+        interaction: discord.Interaction,
+        event_id: str,
+        reminder_minutes: str,
+        calendar_id: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            mins = sorted(
+                {
+                    int(v.strip())
+                    for v in reminder_minutes.split(",")
+                    if v.strip()
+                }
+            )
+        except ValueError:
+            await interaction.followup.send(
+                "Invalid `reminder_minutes`. Use comma-separated integers like `10,60`.",
+                ephemeral=True,
+            )
+            return
+
+        if not mins or any(m < 0 for m in mins):
+            await interaction.followup.send(
+                "`reminder_minutes` must contain non-negative integers.",
+                ephemeral=True,
+            )
+            return
+
+        service, auth_error = await self._get_service_for_user(interaction.user.id)
+        if not service:
+            await interaction.followup.send(auth_error, ephemeral=True)
+            return
+
+        target_calendar = calendar_id or await self._resolve_default_calendar(interaction.user.id)
+        reminder_payload = {
+            "reminders": {
+                "useDefault": False,
+                "overrides": [{"method": "popup", "minutes": m} for m in mins],
+            }
+        }
+
+        def patch_event():
+            return service.events().patch(
+                calendarId=target_calendar,
+                eventId=event_id,
+                body=reminder_payload,
+            ).execute()
+
+        try:
+            await asyncio.to_thread(patch_event)
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            if status == 404:
+                await interaction.followup.send(
+                    f"No event found with ID `{event_id}` in `{target_calendar}`.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                f"Google Calendar rejected the request ({status or 'unknown'}). "
+                "Reconnect with `/gcal connect` to grant write scope, then try again.",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(f"Failed to set reminder: {e}", ephemeral=True)
+            return
+
+        mins_pretty = ", ".join(str(m) for m in mins)
+        await interaction.followup.send(
+            f"Reminder updated ✅\nEvent ID: `{event_id}`\nMinutes: `{mins_pretty}`\nCalendar: `{target_calendar}`",
+            ephemeral=True,
+        )
 
 
     @app_commands.command(name="calendars", description="Choose which calendars to use for reminders")
@@ -226,10 +500,13 @@ class GCal(commands.GroupCog, group_name="gcal"):
         for ev in items[:10]:
             title = ev.get("summary") or "Untitled"
             when = self._event_time_display(ev)
+            event_id = ev.get("id", "unknown")
 
             # optional: show which calendar it came from if you add it later
             location = ev.get("location")
-            extra = f"\n📍 {location}" if location else ""
+            extra = f"\n`ID: {event_id}`"
+            if location:
+                extra += f"\n📍 {location}"
 
             embed.add_field(
                 name=title[:256],
@@ -240,6 +517,66 @@ class GCal(commands.GroupCog, group_name="gcal"):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
         # await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+    @app_commands.command(name="status", description="Show Google Calendar connection/debug status")
+    async def status(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = interaction.user.id
+        rt = await asyncio.to_thread(get_refresh_token, user_id)
+        selected = await asyncio.to_thread(get_selected_calendars, user_id)
+        selected_display = ", ".join(selected) if selected else "primary (default)"
+
+        if not rt:
+            await interaction.followup.send(
+                "\n".join(
+                    [
+                        "Google Calendar status:",
+                        f"- discord_user_id: `{user_id}`",
+                        "- refresh_token_in_db: `False`",
+                        f"- selected_calendars: `{selected_display}`",
+                        "- auth_check: `skipped (no token)`",
+                    ]
+                ),
+                ephemeral=True,
+            )
+            return
+
+        def auth_check() -> tuple[bool, str]:
+            creds = Credentials(
+                token=None,
+                refresh_token=rt,
+                token_uri=TOKEN_URI,
+                client_id=os.environ["CLIENT_ID"],
+                client_secret=os.environ["CLIENT_SECRET"],
+                scopes=SCOPES,
+            )
+            creds.refresh(Request())
+            service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+            primary = service.calendars().get(calendarId="primary").execute()
+            summary = primary.get("summary", "primary")
+            return True, f"ok (primary='{summary}')"
+
+        try:
+            ok, detail = await asyncio.to_thread(auth_check)
+            auth_text = f"{ok} ({detail})"
+        except Exception as e:
+            auth_text = f"False ({e})"
+
+        await interaction.followup.send(
+            "\n".join(
+                [
+                    "Google Calendar status:",
+                    f"- discord_user_id: `{user_id}`",
+                    "- refresh_token_in_db: `True`",
+                    f"- selected_calendars: `{selected_display}`",
+                    f"- auth_check: `{auth_text}`",
+                    f"- requested_scopes: `{', '.join(SCOPES)}`",
+                ]
+            ),
+            ephemeral=True,
+        )
 
 
 class CalendarSelect(discord.ui.Select):
