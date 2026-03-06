@@ -7,7 +7,7 @@
 
 PRTS is an AI-enabled Discord bot designed for technical communities. It provides conversational assistance, tool-driven workflows, and Google Calendar automation with a focus on safety, privacy, and operational control.
 
-> NOTE: PRTS is actively evolving and remains a work in progress. The project is intended to stay open source.
+> NOTE: PRTS is actively evolving and remains a work in progress.
 
 ## Core Capabilities
 
