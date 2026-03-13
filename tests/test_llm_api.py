@@ -9,6 +9,7 @@ class DummyResponse:
     def __init__(self, payload: dict, status_code: int = 200) -> None:
         self._payload = payload
         self.status_code = status_code
+        self.text = json.dumps(payload)
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -162,3 +163,21 @@ def test_chat_ollama_defaults_without_auth_header(monkeypatch: pytest.MonkeyPatc
     assert captured["url"] == "http://localhost:11434/v1/chat/completions"
     assert "Authorization" not in captured["headers"]
     assert captured["json"]["model"] == "llama3.1:8b"
+
+
+def test_chat_logs_http_error_response_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = []
+
+    def fake_post(*args, **kwargs):
+        return DummyResponse({"error": {"message": "tools not supported"}}, status_code=400)
+
+    monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api, "log", lambda message, level=None, **kwargs: logged.append((message, level)))
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "ollama", raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", None, raising=False)
+
+    with pytest.raises(RuntimeError):
+        llm_api.chat("hi")
+
+    assert logged
+    assert "tools not supported" in logged[0][0]

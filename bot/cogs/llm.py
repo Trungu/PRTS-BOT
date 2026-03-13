@@ -26,6 +26,7 @@ from tools.toolcalls.safety_responder import (
 )
 from tools import katex_formatter
 import settings
+from utils.channel_memory import lookup_messages
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,18 @@ _SENSITIVE_TOOL_KEY_RE: re.Pattern[str] = re.compile(
 )
 _TOOL_INVENTORY_LEAK_RE: re.Pattern[str] = re.compile(
     r"(?is)\b(commands?|functions?)\b.{0,80}\b(can run|available|reference)\b"
+)
+_MEMORY_LOOKUP_TRIGGER_RE: re.Pattern[str] = re.compile(
+    r"(?is)\b("
+    r"do you remember|"
+    r"what were we talking about|"
+    r"what were we discussing|"
+    r"what did we talk about|"
+    r"what did i say earlier|"
+    r"what was i asking about|"
+    r"earlier context|"
+    r"previous context"
+    r")\b"
 )
 
 
@@ -140,6 +153,78 @@ def _looks_like_internal_tool_inventory(reply: str) -> bool:
             if hits >= 2:
                 return True
     return False
+
+
+def _extract_reply_context(message: discord.Message) -> str | None:
+    """Return a short context block for the referenced message, if any."""
+    ref = getattr(message, "reference", None)
+    target = getattr(ref, "resolved", None) if ref is not None else None
+    if target is None:
+        return None
+
+    target_content = str(getattr(target, "content", "") or "").strip()
+    if not target_content:
+        return None
+
+    target_author = getattr(target, "author", None)
+    author_name = (
+        getattr(target_author, "display_name", None)
+        or getattr(target_author, "global_name", None)
+        or getattr(target_author, "name", None)
+        or str(target_author or "unknown")
+    )
+    return (
+        "[Referenced message context]\n"
+        f"- author: {author_name}\n"
+        f"- content: {target_content}\n\n"
+    )
+
+
+def _should_inject_memory_context(prompt: str) -> bool:
+    """Return True for prompts that explicitly ask about earlier discussion."""
+    return bool(_MEMORY_LOOKUP_TRIGGER_RE.search(prompt))
+
+
+def _format_recent_rows(rows: list[dict], *, cap: int) -> str:
+    """Render recent channel rows into a compact prompt block."""
+    if not rows:
+        return ""
+
+    lines: list[str] = []
+    for row in rows[-cap:]:
+        ts = str(row.get("timestamp", "unknown"))
+        author = str(row.get("author", "unknown"))
+        content = str(row.get("content", "")).replace("\n", " ").strip()
+        if len(content) > 240:
+            content = content[:240] + "..."
+        lines.append(f"- [{ts}] {author}: {content}")
+    return "\n".join(lines)
+
+
+def _build_recent_context_block(message: discord.Message, author_name: str) -> str:
+    """Build a default recent-context block from transient channel memory."""
+    if not settings.RECENT_CONTEXT_ENABLED:
+        return ""
+
+    lookback = max(1, settings.RECENT_CONTEXT_MESSAGE_COUNT)
+    rows = lookup_messages(
+        channel_id=int(getattr(message.channel, "id", 0) or 0),
+        lookback=lookback + 1,
+        include_bot_messages=True,
+    )
+    if rows:
+        latest = rows[-1]
+        current_text = str(getattr(message, "content", "") or "").strip()
+        if (
+            str(latest.get("author", "")) == author_name
+            and str(latest.get("content", "")).strip() == current_text
+        ):
+            rows = rows[:-1]
+
+    rendered = _format_recent_rows(rows, cap=lookback)
+    if not rendered:
+        return ""
+    return f"[Recent channel context]\n{rendered}\n\n"
 
 
 def _split_smart(text: str, limit: int = _DISCORD_MAX) -> list[str]:
@@ -385,16 +470,33 @@ class LLM(commands.Cog):
             or getattr(message.author, "name", None)
             or str(message.author)
         )
+        author_name = (
+            getattr(message.author, "display_name", None)
+            or str(message.author)
+        )
         now_local = datetime.now().astimezone()
-        full_prompt = (
+        runtime_context = (
             "[System runtime context]\n"
             f"- discord_user_id: {user_id}\n"
             f"- discord_nickname: {user_nickname}\n"
             f"- current_datetime: {now_local.isoformat()}\n"
             f"- current_date: {now_local.date().isoformat()}\n"
             f"- timezone: {now_local.tzname() or 'local'}\n\n"
-            f"{prompt}"
         )
+        reply_context = _extract_reply_context(message) or ""
+        recent_context = _build_recent_context_block(message, author_name)
+        memory_context = ""
+        if settings.TEMPORARY_MEMORY_ENABLED and _should_inject_memory_context(prompt):
+            memory_context = (
+                "[Extended channel context]\n"
+                + _tool_registry.channel_history_lookup(
+                    channel_id=int(getattr(message.channel, "id", 0) or 0),
+                    lookback=max(settings.RECENT_CONTEXT_MESSAGE_COUNT, 12),
+                    include_bot_messages=True,
+                )
+                + "\n\n"
+            )
+        full_prompt = f"{reply_context}{recent_context}{memory_context}{runtime_context}{prompt}"
         if message.attachments:
             uploaded: list[str] = []
             try:

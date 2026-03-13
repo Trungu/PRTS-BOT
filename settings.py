@@ -110,6 +110,19 @@ REPLY_TRIGGER_ENABLED: bool = _parse_bool(
     True,
 )
 
+# If True, include a small recent channel context window in every LLM prompt.
+RECENT_CONTEXT_ENABLED: bool = _parse_bool(
+    get_env_var("RECENT_CONTEXT_ENABLED", required=False),
+    True,
+)
+
+# Number of recent prior channel messages to include in the default prompt context.
+RECENT_CONTEXT_MESSAGE_COUNT: int = _parse_int(
+    get_env_var("RECENT_CONTEXT_MESSAGE_COUNT", required=False),
+    20,
+    min_value=1,
+)
+
 # ---------------------------------------------------------------------------
 # Temporary memory (channel history context)
 # ---------------------------------------------------------------------------

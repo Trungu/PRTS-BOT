@@ -259,12 +259,9 @@ class AdminCog(commands.Cog):
     async def _delete_count(
         self, message: discord.Message, command: str
     ) -> None:
-        """Delete up to N recent bot messages.
+        """Delete the N most recent channel messages, then remove the command.
 
         Usage: ``delete count <N>``  (N must be a positive integer)
-
-        Only messages authored by this bot are deleted.  The user's
-        command message and all other users' messages are left untouched.
         """
         if not is_allowed(message.author.id):
             await self._deny(message)
@@ -289,17 +286,15 @@ class AdminCog(commands.Cog):
             await message.channel.send("⚠️ Count must be at least 1.")
             return
 
-        # Scan history and collect only bot-authored messages.
+        # Delete the N most recent messages before the command, regardless of author.
         to_delete: list[discord.Message] = []
         async for msg in message.channel.history(limit=200, before=message):
-            if msg.author.id == self.bot.user.id:
-                to_delete.append(msg)
-                if len(to_delete) >= n:
-                    break
+            to_delete.append(msg)
+            if len(to_delete) >= n:
+                break
 
-        if not to_delete:
-            await message.channel.send("ℹ️ No bot messages found to delete.")
-            return
+        # Also delete the invoking command for cleaner moderation flow.
+        to_delete.append(message)
 
         try:
             await _bulk_delete(message.channel, to_delete)

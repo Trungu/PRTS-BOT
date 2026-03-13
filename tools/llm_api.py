@@ -23,6 +23,7 @@ from typing import Callable, Literal, TypedDict
 
 import settings
 from tools.toolcalls.tool_registry import TOOLS, TOOL_DEFINITIONS
+from utils.logger import log, LogLevel
 
 # ---------------------------------------------------------------------------
 # Types
@@ -43,10 +44,21 @@ class Message(TypedDict):
 
 _DEFAULT_PROVIDER  = "groq"
 _DEFAULT_BASE_URL  = "https://api.groq.com/openai/v1"
-_DEFAULT_MODEL     = "llama-3.1-8b-instant"
+_DEFAULT_MODEL     = "openai/gpt-oss-20b"
 _OLLAMA_BASE_URL   = "http://localhost:11434/v1"
 _OLLAMA_MODEL      = "llama3.1:8b"
 MAX_TOOL_CALLS     = 99   # hard ceiling on agentic iterations
+
+
+def _response_body_for_log(response: requests.Response) -> str:
+    """Extract a concise response body for terminal logging."""
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    try:
+        return json.dumps(response.json(), ensure_ascii=True)
+    except Exception:
+        return "<no response body>"
 
 # ---------------------------------------------------------------------------
 # Core function
@@ -147,7 +159,15 @@ def chat(
             body["tool_choice"] = "auto"
 
         response = requests.post(url, headers=headers, json=body, timeout=timeout)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except Exception:
+            log(
+                f"[LLM API] HTTP error from {url} | status={getattr(response, 'status_code', 'unknown')} "
+                f"| body={_response_body_for_log(response)}",
+                LogLevel.ERROR,
+            )
+            raise
         data = response.json()
 
         try:

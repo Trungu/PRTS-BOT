@@ -78,6 +78,8 @@ python main.py
 - `settings.py` is the single source of truth for runtime configuration.
 - Environment variables are loaded and parsed there (tokens, API keys, OAuth settings, prefixes).
 - Feature flags (for example reply-trigger behavior and message silence modes) are also defined there.
+- Recent prompt context is enabled by default and injects a small recent channel window into every LLM request.
+- You can tune that default context size with `RECENT_CONTEXT_MESSAGE_COUNT` or disable it with `RECENT_CONTEXT_ENABLED=false`.
 - LLM backend selection is opt-in via `LLM_PROVIDER`:
   - default: hosted Groq-compatible mode
   - optional: `ollama` for local OpenAI-compatible requests

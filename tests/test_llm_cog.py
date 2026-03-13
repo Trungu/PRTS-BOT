@@ -10,6 +10,7 @@ from bot.cogs import llm as llm_cog
 class DummyChannel:
     def __init__(self) -> None:
         self.sent = []
+        self.id = 123
 
     async def send(self, content, **kwargs):
         self.sent.append((content, kwargs))
@@ -24,10 +25,27 @@ class DummyMessage:
         self.author = "user"
         self.channel = DummyChannel()
         self.attachments: list = []
+        self.reference = None
 
     async def reply(self, content=None, **kwargs) -> None:
         """Delegate to channel.send so test assertions on channel.sent still work."""
         await self.channel.send(content, **kwargs)
+
+
+class DummyReferencedAuthor:
+    def __init__(self, name: str) -> None:
+        self.display_name = name
+
+
+class DummyReferencedMessage:
+    def __init__(self, content: str, author_name: str = "PRTS") -> None:
+        self.content = content
+        self.author = DummyReferencedAuthor(author_name)
+
+
+class DummyRef:
+    def __init__(self, resolved) -> None:
+        self.resolved = resolved
 
 
 class DummyBot:
@@ -283,6 +301,95 @@ def test_ask_includes_discord_nickname_in_runtime_context(monkeypatch: pytest.Mo
 
     assert "- discord_user_id: 42" in seen_prompt["text"]
     assert "- discord_nickname: Western Block" in seen_prompt["text"]
+
+
+def test_ask_includes_referenced_message_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+    msg.reference = DummyRef(
+        DummyReferencedMessage("Use u = 1 + x^2, then du = 2x dx.")
+    )
+
+    seen_prompt = {"text": ""}
+
+    def fake_chat(*args, **kwargs):
+        seen_prompt["text"] = args[0]
+        return "ok"
+
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(cog._ask(cast(Any, msg), "can you elaborate on that step?"))
+
+    assert "[Referenced message context]" in seen_prompt["text"]
+    assert "Use u = 1 + x^2, then du = 2x dx." in seen_prompt["text"]
+
+
+def test_ask_injects_recent_memory_context_for_memory_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    seen_prompt = {"text": ""}
+
+    def fake_lookup(*, channel_id, lookback=20, query=None, include_bot_messages=False):
+        assert channel_id == 123
+        assert lookback == 12
+        assert include_bot_messages is True
+        return "Recent channel context (2 message(s), capped at 60):\n- [ts] user: earlier topic"
+
+    def fake_chat(*args, **kwargs):
+        seen_prompt["text"] = args[0]
+        return "ok"
+
+    monkeypatch.setattr(llm_cog.settings, "TEMPORARY_MEMORY_ENABLED", True, raising=False)
+    monkeypatch.setattr(llm_cog.settings, "RECENT_CONTEXT_ENABLED", False, raising=False)
+    monkeypatch.setattr(llm_cog.settings, "RECENT_CONTEXT_MESSAGE_COUNT", 10, raising=False)
+    monkeypatch.setattr(llm_cog._tool_registry, "channel_history_lookup", fake_lookup)
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(cog._ask(cast(Any, msg), "do you remember what we were talking about"))
+
+    assert "[Extended channel context]" in seen_prompt["text"]
+    assert "earlier topic" in seen_prompt["text"]
+
+
+def test_ask_injects_default_recent_context_for_every_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+    msg.content = "hello"
+
+    seen_prompt = {"text": ""}
+
+    def fake_lookup_messages(*, channel_id, lookback=20, query=None, include_bot_messages=False):
+        assert channel_id == 123
+        assert lookback == 3
+        assert include_bot_messages is True
+        return [
+            {"timestamp": "t1", "author": "alice", "content": "older", "author_is_bot": False},
+            {"timestamp": "t2", "author": "user", "content": "", "author_is_bot": False},
+            {"timestamp": "t3", "author": "user", "content": "hello", "author_is_bot": False},
+        ]
+
+    def fake_chat(*args, **kwargs):
+        seen_prompt["text"] = args[0]
+        return "ok"
+
+    monkeypatch.setattr(llm_cog.settings, "RECENT_CONTEXT_ENABLED", True, raising=False)
+    monkeypatch.setattr(llm_cog.settings, "RECENT_CONTEXT_MESSAGE_COUNT", 2, raising=False)
+    monkeypatch.setattr(llm_cog, "lookup_messages", fake_lookup_messages)
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(cog._ask(cast(Any, msg), "hello"))
+
+    assert "[Recent channel context]" in seen_prompt["text"]
+    assert "older" in seen_prompt["text"]
+    assert "- [t3] user: hello" not in seen_prompt["text"]
 
 
 def test_ask_blocks_internal_tool_inventory_leak(monkeypatch: pytest.MonkeyPatch) -> None:

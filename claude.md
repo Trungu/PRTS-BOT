@@ -274,6 +274,12 @@ os.getenv("DISCORD_TOKEN")  # WRONG — never do this outside settings.py
 | `BOT_PREFIX` | list[str] | Trigger word(s) e.g. `["gemma"]` |
 | `PREFIX_SMART_CHARS` | list[str] | Suffix variants e.g. `[" ", ", ", ". "]` |
 | `PREFIX_CASE_SENSITIVE` | bool | Case sensitivity (default: False) |
+| `REPLY_TRIGGER_ENABLED` | bool | Allow direct replies to bot messages without prefix |
+| `RECENT_CONTEXT_ENABLED` | bool | Inject a small recent channel context window into every LLM prompt |
+| `RECENT_CONTEXT_MESSAGE_COUNT` | int | Number of prior messages included in the default recent context window |
+| `TEMPORARY_MEMORY_ENABLED` | bool | Enable deeper in-memory channel-history lookup |
+| `TEMP_MEMORY_BUFFER_SIZE` | int | Max stored messages per channel for transient memory |
+| `TEMP_MEMORY_MAX_LOOKBACK` | int | Max messages returned by transient history lookup |
 | `TOOLCALL_SILENT` | bool | Silent notifications for tool calls |
 | `GLOBAL_SILENT` | bool | Silent flag on every bot message |
 | `SMART_CUTOFF` | bool | Smart vs. hard message splitting at 2000 chars |
@@ -457,7 +463,7 @@ or by passing a `check` filter to `channel.purge()` (for `delete time`).
 | Command | Behaviour |
 |---|---|
 | `delete response` | Scans history backwards from the command message. Deletes every consecutive message **authored by this bot** until a non-bot message is reached, then stops. The user's command message is **not** deleted. If no bot messages are found, sends an info message. |
-| `delete count <N>` | Scans history and deletes up to N messages **authored by this bot**, skipping any user messages. N must be a positive integer. The user's command message is **not** deleted. If no bot messages are found, sends an info message. |
+| `delete count <N>` | Scans history and deletes the previous N channel messages regardless of author, then also deletes the invoking command message. N must be a positive integer. |
 | `delete time <duration>` | Purges up to 500 **bot-authored** messages sent within the last `<duration>` by passing `check=lambda msg: msg.author.id == bot_id` to `channel.purge()`. User messages are never touched. |
 
 #### Duration format (`delete time`)
@@ -541,7 +547,7 @@ not persist across rebuilds.
 ### Provider
 
 Groq API by default (`https://api.groq.com/openai/v1`, model
-`llama-3.1-8b-instant`). Local Ollama is also supported via
+`openai/gpt-oss-20b`). Local Ollama is also supported via
 `LLM_PROVIDER=ollama` (default `http://localhost:11434/v1`, model
 `llama3.1:8b`). Fully OpenAI-compatible — swap providers or override
 `LLM_BASE_URL` and `LLM_MODEL` in `.env`.

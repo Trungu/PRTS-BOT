@@ -7,7 +7,7 @@
 #   _delete_response      — auth denial, consecutive bot messages, human barrier,
 #                           empty / no-prior-bot history, Forbidden permission error
 #   _delete_count         — auth denial, missing arg, non-integer, zero/negative,
-#                           valid scan (only bot msgs), no bot msgs, Forbidden
+#                           valid scan (recent channel msgs), command deletion, Forbidden
 #   _delete_time          — auth denial, missing arg, invalid duration,
 #                           valid minutes/hours/combined, zero duration rejected,
 #                           check filter (only bot msgs), Forbidden permission error
@@ -360,8 +360,8 @@ def test_delete_count_negative_rejected(monkeypatch) -> None:
     assert msg.channel.purge_calls == []
 
 
-def test_delete_count_valid_deletes_only_bot_messages(monkeypatch) -> None:
-    """delete count N scans history and only deletes bot-authored messages."""
+def test_delete_count_valid_deletes_recent_channel_messages(monkeypatch) -> None:
+    """delete count N deletes the most recent channel messages before the command."""
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
 
     bot = DummyBot()
@@ -373,19 +373,19 @@ def test_delete_count_valid_deletes_only_bot_messages(monkeypatch) -> None:
     bot_msg2 = _DelMsg(user_id=BOT_USER_ID, is_bot=True)
     msg.channel._history_msgs = [bot_msg1, human_msg, bot_msg2]
 
-    asyncio.run(cog._delete_count(cast(Any, msg), "delete count 10"))
+    asyncio.run(cog._delete_count(cast(Any, msg), "delete count 2"))
 
-    # Both bot messages collected; human message untouched.
+    # The two most recent prior messages are deleted, regardless of author.
     assert len(msg.channel.deleted_batches) == 1
     batch = msg.channel.deleted_batches[0]
     assert bot_msg1 in batch
-    assert bot_msg2 in batch
-    assert human_msg not in batch
-    assert msg not in batch  # command message never deleted
+    assert human_msg in batch
+    assert bot_msg2 not in batch
+    assert msg in batch  # command message is also deleted
 
 
-def test_delete_count_value_one_deletes_one_bot_message(monkeypatch) -> None:
-    """delete count 1 — only the most recent bot message is deleted."""
+def test_delete_count_value_one_deletes_one_prior_message_and_command(monkeypatch) -> None:
+    """delete count 1 deletes the most recent prior message plus the command."""
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
 
     bot = DummyBot()
@@ -398,13 +398,14 @@ def test_delete_count_value_one_deletes_one_bot_message(monkeypatch) -> None:
 
     asyncio.run(cog._delete_count(cast(Any, msg), "delete count 1"))
 
-    # Only one bot message should be deleted.
+    # Only the most recent prior message plus the command are deleted.
     assert bot_msg1._deleted is True
     assert bot_msg2._deleted is False
+    assert msg._deleted is True
 
 
-def test_delete_count_skips_user_messages(monkeypatch) -> None:
-    """User messages are never deleted, even when mixed in with bot messages."""
+def test_delete_count_can_delete_user_messages(monkeypatch) -> None:
+    """delete count intentionally deletes recent messages regardless of author."""
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
 
     bot = DummyBot()
@@ -418,21 +419,22 @@ def test_delete_count_skips_user_messages(monkeypatch) -> None:
     asyncio.run(cog._delete_count(cast(Any, msg), "delete count 5"))
 
     assert bot_msg._deleted is True
-    assert human_msg._deleted is False
+    assert human_msg._deleted is True
 
 
-def test_delete_count_no_bot_messages_sends_info(monkeypatch) -> None:
-    """When no bot messages exist, an info message is sent."""
+def test_delete_count_with_no_prior_messages_deletes_command(monkeypatch) -> None:
+    """When no prior history exists, the command message is still deleted."""
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
 
     bot = DummyBot()
     cog = AdminCog(cast(Any, bot))
     msg = _DelMsg(user_id=42)
-    msg.channel._history_msgs = [_DelMsg(user_id=7), _DelMsg(user_id=8)]
+    msg.channel._history_msgs = []
 
     asyncio.run(cog._delete_count(cast(Any, msg), "delete count 3"))
 
-    assert any("no bot messages" in str(s[0]).lower() for s in msg.channel.sent)
+    assert msg._deleted is True
+    assert msg.channel.sent == []
 
 
 # ---------------------------------------------------------------------------

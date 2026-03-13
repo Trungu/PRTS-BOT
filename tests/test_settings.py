@@ -19,6 +19,9 @@ def test_config_values_have_correct_types() -> None:
     assert isinstance(settings.LLM_PROVIDER, str)
     assert settings.LLM_PROVIDER in {"groq", "ollama"}
     assert isinstance(settings.REPLY_TRIGGER_ENABLED, bool)
+    assert isinstance(settings.RECENT_CONTEXT_ENABLED, bool)
+    assert isinstance(settings.RECENT_CONTEXT_MESSAGE_COUNT, int)
+    assert settings.RECENT_CONTEXT_MESSAGE_COUNT >= 1
     assert isinstance(settings.TEMPORARY_MEMORY_ENABLED, bool)
     assert isinstance(settings.TEMP_MEMORY_BUFFER_SIZE, int)
     assert settings.TEMP_MEMORY_BUFFER_SIZE >= 10
