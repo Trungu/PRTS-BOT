@@ -31,6 +31,7 @@ from utils.admin import (
     unban_user,
     is_banned,
 )
+from utils.channel_memory import forget_discord_messages
 from utils.logger import log, LogLevel
 
 
@@ -250,6 +251,7 @@ class AdminCog(commands.Cog):
                 "⛔ I don't have **Manage Messages** permission in this channel."
             )
             return
+        forget_discord_messages(to_delete)
         log(
             f"[Admin] delete response: {len(to_delete)} message(s) deleted"
             f" by {message.author} (id={message.author.id})",
@@ -303,6 +305,7 @@ class AdminCog(commands.Cog):
                 "⛔ I don't have **Manage Messages** permission in this channel."
             )
             return
+        forget_discord_messages(to_delete)
         log(
             f"[Admin] delete count {n}: {len(to_delete)} message(s) deleted"
             f" by {message.author} (id={message.author.id})",
@@ -355,6 +358,7 @@ class AdminCog(commands.Cog):
                 "⛔ I don't have **Manage Messages** permission in this channel."
             )
             return
+        forget_discord_messages(deleted)
         log(
             f"[Admin] delete time {duration_str}: {len(deleted)} message(s) deleted"
             f" by {message.author} (id={message.author.id})",

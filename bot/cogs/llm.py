@@ -76,20 +76,6 @@ _SENSITIVE_TOOL_KEY_RE: re.Pattern[str] = re.compile(
 _TOOL_INVENTORY_LEAK_RE: re.Pattern[str] = re.compile(
     r"(?is)\b(commands?|functions?)\b.{0,80}\b(can run|available|reference)\b"
 )
-_MEMORY_LOOKUP_TRIGGER_RE: re.Pattern[str] = re.compile(
-    r"(?is)\b("
-    r"do you remember|"
-    r"what were we talking about|"
-    r"what were we discussing|"
-    r"what did we talk about|"
-    r"what did i say earlier|"
-    r"what was i asking about|"
-    r"earlier context|"
-    r"previous context"
-    r")\b"
-)
-
-
 def _format_iso_brief(iso_str: str | None) -> str:
     if not iso_str:
         return "N/A"
@@ -180,9 +166,58 @@ def _extract_reply_context(message: discord.Message) -> str | None:
     )
 
 
-def _should_inject_memory_context(prompt: str) -> bool:
-    """Return True for prompts that explicitly ask about earlier discussion."""
-    return bool(_MEMORY_LOOKUP_TRIGGER_RE.search(prompt))
+def _is_channel_recall_request(prompt: str) -> bool:
+    """Detect prompts asking to recall prior discussion in the current channel.
+
+    Uses a small intent heuristic rather than a long exact-phrase list so
+    variants like "what was the first stats problem in this channel" still
+    route to deterministic channel recall.
+    """
+    text = prompt.lower()
+
+    exact_phrases = (
+        "do you remember",
+        "what were we talking about",
+        "what were we discussing",
+        "what did we talk about",
+        "what did i say earlier",
+        "what was i asking about",
+        "earlier context",
+        "previous context",
+        "what was talked about before",
+        "what had been discussed in the channel before",
+    )
+    if any(phrase in text for phrase in exact_phrases):
+        return True
+
+    local_scope_terms = ("in this channel", "this channel", "here", "we", "earlier here")
+    retrieval_terms = ("remember", "look up", "lookup", "pull up", "check", "recall", "review", "find", "what was")
+    temporal_terms = ("before", "earlier", "previous", "prior", "back", "first", "earliest", "last")
+    content_terms = (
+        "talk",
+        "talking",
+        "discuss",
+        "discussed",
+        "conversation",
+        "context",
+        "history",
+        "recap",
+        "message",
+        "problem",
+        "topic",
+    )
+
+    score = 0
+    if any(term in text for term in local_scope_terms):
+        score += 1
+    if any(term in text for term in retrieval_terms):
+        score += 1
+    if any(term in text for term in temporal_terms):
+        score += 1
+    if any(term in text for term in content_terms):
+        score += 1
+
+    return score >= 2
 
 
 def _format_recent_rows(rows: list[dict], *, cap: int) -> str:
@@ -486,7 +521,8 @@ class LLM(commands.Cog):
         reply_context = _extract_reply_context(message) or ""
         recent_context = _build_recent_context_block(message, author_name)
         memory_context = ""
-        if settings.TEMPORARY_MEMORY_ENABLED and _should_inject_memory_context(prompt):
+        recall_instruction = ""
+        if settings.TEMPORARY_MEMORY_ENABLED and _is_channel_recall_request(prompt):
             memory_context = (
                 "[Extended channel context]\n"
                 + _tool_registry.channel_history_lookup(
@@ -496,7 +532,14 @@ class LLM(commands.Cog):
                 )
                 + "\n\n"
             )
-        full_prompt = f"{reply_context}{recent_context}{memory_context}{runtime_context}{prompt}"
+            recall_instruction = (
+                "[Recall request handling]\n"
+                "- The user is asking about prior discussion in this same channel.\n"
+                "- You already have the relevant current-channel context below.\n"
+                "- Do not ask for a channel ID.\n"
+                "- Summarize the available prior discussion directly from the provided context.\n\n"
+            )
+        full_prompt = f"{reply_context}{recent_context}{memory_context}{recall_instruction}{runtime_context}{prompt}"
         if message.attachments:
             uploaded: list[str] = []
             try:

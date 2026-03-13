@@ -71,7 +71,7 @@ def chat(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 1024,
-    timeout: int = 30,
+    timeout: int | None = None,
     enable_tools: bool = True,
     on_tool_call: Callable[[str, dict, str], None] | None = None,
     tool_args_transform: Callable[[str, dict], dict] | None = None,
@@ -135,6 +135,7 @@ def chat(
     default_model = _OLLAMA_MODEL if provider == "ollama" else _DEFAULT_MODEL
     base_url   = (settings.LLM_BASE_URL or default_base_url).rstrip("/")
     model_name = model or settings.LLM_MODEL or default_model
+    request_timeout = timeout or settings.LLM_REQUEST_TIMEOUT_SECONDS
     url        = f"{base_url}/chat/completions"
 
     headers = {"Content-Type": "application/json"}
@@ -158,7 +159,7 @@ def chat(
             body["tools"]       = TOOL_DEFINITIONS
             body["tool_choice"] = "auto"
 
-        response = requests.post(url, headers=headers, json=body, timeout=timeout)
+        response = requests.post(url, headers=headers, json=body, timeout=request_timeout)
         try:
             response.raise_for_status()
         except Exception:

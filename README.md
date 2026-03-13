@@ -80,9 +80,11 @@ python main.py
 - Feature flags (for example reply-trigger behavior and message silence modes) are also defined there.
 - Recent prompt context is enabled by default and injects a small recent channel window into every LLM request.
 - You can tune that default context size with `RECENT_CONTEXT_MESSAGE_COUNT` or disable it with `RECENT_CONTEXT_ENABLED=false`.
+- Prompts that look like channel-history recall requests are handled with deterministic extended context injection so the model can answer from the current channel without asking for a channel ID.
 - LLM backend selection is opt-in via `LLM_PROVIDER`:
   - default: hosted Groq-compatible mode
   - optional: `ollama` for local OpenAI-compatible requests
+- LLM HTTP requests default to a 120-second timeout; override with `LLM_REQUEST_TIMEOUT_SECONDS` if needed.
 - When `LLM_PROVIDER=ollama`, the default endpoint is `http://localhost:11434/v1` and the default model is `llama3.1:8b`.
 - Existing hosted setups do not need any `.env` changes.
 

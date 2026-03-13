@@ -271,6 +271,7 @@ os.getenv("DISCORD_TOKEN")  # WRONG — never do this outside settings.py
 | `LLM_API_KEY` | str\|None | API key for hosted LLM providers; optional for Ollama |
 | `LLM_BASE_URL` | str\|None | API endpoint override (default: Groq or Ollama local URL) |
 | `LLM_MODEL` | str\|None | Model name override |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | int | Default HTTP timeout for LLM requests |
 | `BOT_PREFIX` | list[str] | Trigger word(s) e.g. `["gemma"]` |
 | `PREFIX_SMART_CHARS` | list[str] | Suffix variants e.g. `[" ", ", ", ". "]` |
 | `PREFIX_CASE_SENSITIVE` | bool | Case sensitivity (default: False) |

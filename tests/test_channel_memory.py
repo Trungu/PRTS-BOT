@@ -53,3 +53,43 @@ def test_lookup_filters_query_and_excludes_bot_by_default() -> None:
 
     rows_with_bots = cm.lookup_messages(channel_id=7, lookback=10, include_bot_messages=True)
     assert any(r["author_is_bot"] for r in rows_with_bots)
+
+
+def test_forget_discord_messages_removes_matching_rows() -> None:
+    ts = datetime(2026, 1, 4, tzinfo=timezone.utc)
+    cm.remember_message(
+        channel_id=9,
+        author_name="alice",
+        content="keep me",
+        author_is_bot=False,
+        created_at=ts,
+    )
+    cm.remember_message(
+        channel_id=9,
+        author_name="PRTS",
+        content="delete me",
+        author_is_bot=True,
+        created_at=ts,
+    )
+
+    class Author:
+        display_name = "PRTS"
+        bot = True
+
+        def __str__(self) -> str:
+            return "PRTS"
+
+    class Channel:
+        id = 9
+
+    class Message:
+        channel = Channel()
+        author = Author()
+        content = "delete me"
+        created_at = ts
+
+    removed = cm.forget_discord_messages([Message()])
+
+    rows = cm.lookup_messages(channel_id=9, lookback=10, include_bot_messages=True)
+    assert removed == 1
+    assert [row["content"] for row in rows] == ["keep me"]

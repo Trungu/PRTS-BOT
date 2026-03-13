@@ -98,6 +98,12 @@ if LLM_PROVIDER != "ollama" and (LLM_API_KEY is None or LLM_API_KEY.strip() == "
 LLM_BASE_URL = get_env_var("LLM_BASE_URL", required=False)
 # Optional: model name to use (e.g. 'llama3'). Falls back to provider default if unset.
 LLM_MODEL = get_env_var("LLM_MODEL", required=False)
+# Default HTTP timeout for LLM requests.
+LLM_REQUEST_TIMEOUT_SECONDS: int = _parse_int(
+    get_env_var("LLM_REQUEST_TIMEOUT_SECONDS", required=False),
+    120,
+    min_value=5,
+)
 
 # ---------------------------------------------------------------------------
 # Reply trigger

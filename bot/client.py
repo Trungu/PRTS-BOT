@@ -26,6 +26,25 @@ CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
 # Type alias for the LLM fallback handler: receives a Message and the prompt string.
 LLMHandler = Callable[[discord.Message, str], Awaitable[None]]
 
+_MEMORY_EXCLUDED_COMMAND_PREFIXES = (
+    "delete count",
+    "delete time",
+    "delete response",
+)
+
+
+def _should_remember_message(message: discord.Message) -> bool:
+    """Return False for operational commands that should not enter channel memory."""
+    content = str(getattr(message, "content", "") or "")
+    command = get_command(content)
+    if command is None:
+        return True
+    normalized = command.strip().lower()
+    return not any(
+        normalized == prefix or normalized.startswith(prefix + " ")
+        for prefix in _MEMORY_EXCLUDED_COMMAND_PREFIXES
+    )
+
 
 class Bot(commands.Bot):
     """Custom Bot subclass.
@@ -118,17 +137,18 @@ class Bot(commands.Bot):
         3. Walk registered command handlers (longest match first).
         4. Fall back to the LLM handler if no command matched.
         """
+        # Temporary in-memory channel history for optional LLM context lookup.
+        if _should_remember_message(message):
+            remember_message(
+                channel_id=int(getattr(message.channel, "id", 0) or 0),
+                author_name=getattr(message.author, "display_name", None) or str(message.author),
+                content=message.content,
+                author_is_bot=bool(getattr(message.author, "bot", False)),
+                created_at=getattr(message, "created_at", None),
+            )
+
         if message.author.bot:
             return
-
-        # Temporary in-memory channel history for optional LLM context lookup.
-        remember_message(
-            channel_id=int(getattr(message.channel, "id", 0) or 0),
-            author_name=getattr(message.author, "display_name", None) or str(message.author),
-            content=message.content,
-            author_is_bot=bool(getattr(message.author, "bot", False)),
-            created_at=getattr(message, "created_at", None),
-        )
 
         # Crisis / distress gate — runs on ALL messages, no prefix required.
         # Sends emergency resources immediately and then continues normal

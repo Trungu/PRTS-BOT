@@ -29,6 +29,7 @@ def test_chat_plain_text_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_post(*args, **kwargs):
         captured["url"] = args[0]
         captured["headers"] = kwargs["headers"]
+        captured["timeout"] = kwargs["timeout"]
         return DummyResponse(payload)
 
     monkeypatch.setattr(llm_api.requests, "post", fake_post)
@@ -36,11 +37,13 @@ def test_chat_plain_text_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
     monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(llm_api.settings, "LLM_MODEL", "model-x")
+    monkeypatch.setattr(llm_api.settings, "LLM_REQUEST_TIMEOUT_SECONDS", 120, raising=False)
 
     result = llm_api.chat("hi")
     assert result == "hello"
     assert captured["url"] == "https://example.com/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer key"
+    assert captured["timeout"] == 120
 
 
 def test_chat_tool_call_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,3 +184,24 @@ def test_chat_logs_http_error_response_body(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert logged
     assert "tools not supported" in logged[0][0]
+
+
+def test_chat_explicit_timeout_overrides_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}]
+    }
+    captured = {}
+
+    def fake_post(*args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return DummyResponse(payload)
+
+    monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
+    monkeypatch.setattr(llm_api.settings, "LLM_REQUEST_TIMEOUT_SECONDS", 120, raising=False)
+
+    result = llm_api.chat("hi", timeout=15)
+
+    assert result == "hello"
+    assert captured["timeout"] == 15

@@ -68,6 +68,72 @@ def test_on_message_ignores_bot_author(monkeypatch: pytest.MonkeyPatch) -> None:
     assert called["processed"] is False
 
 
+def test_on_message_records_bot_authored_messages_in_channel_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = Bot()
+    msg = DummyMessage("bot hello", author_bot=True)
+    remembered = []
+
+    monkeypatch.setattr(
+        "bot.client.remember_message",
+        lambda **kwargs: remembered.append(kwargs),
+    )
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert remembered == [
+        {
+            "channel_id": 0,
+            "author_name": str(msg.author),
+            "content": "bot hello",
+            "author_is_bot": True,
+            "created_at": None,
+        }
+    ]
+
+
+def test_on_message_skips_delete_count_command_in_channel_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = Bot()
+    msg = DummyMessage("delete count 3")
+    remembered = []
+
+    monkeypatch.setattr(
+        "bot.client.remember_message",
+        lambda **kwargs: remembered.append(kwargs),
+    )
+    monkeypatch.setattr("bot.client.get_command", lambda _: "delete count 3")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert remembered == []
+
+
+def test_on_message_keeps_normal_message_in_channel_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = Bot()
+    msg = DummyMessage("hello")
+    remembered = []
+
+    monkeypatch.setattr(
+        "bot.client.remember_message",
+        lambda **kwargs: remembered.append(kwargs),
+    )
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert len(remembered) == 1
+    assert remembered[0]["content"] == "hello"
+
+
 def test_on_message_dispatches_longest_match(monkeypatch: pytest.MonkeyPatch) -> None:
     bot = Bot()
     msg = DummyMessage("ignored")

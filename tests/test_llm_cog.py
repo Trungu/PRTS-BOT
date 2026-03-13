@@ -354,6 +354,77 @@ def test_ask_injects_recent_memory_context_for_memory_prompts(
 
     assert "[Extended channel context]" in seen_prompt["text"]
     assert "earlier topic" in seen_prompt["text"]
+    assert "Do not ask for a channel ID." in seen_prompt["text"]
+
+
+def test_ask_injects_extended_context_for_lookup_channel_before_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    seen_prompt = {"text": ""}
+
+    def fake_lookup(*, channel_id, lookback=20, query=None, include_bot_messages=False):
+        assert channel_id == 123
+        assert include_bot_messages is True
+        return "Recent channel context (1 message(s), capped at 60):\n- [ts] user: math discussion"
+
+    def fake_chat(*args, **kwargs):
+        seen_prompt["text"] = args[0]
+        return "ok"
+
+    monkeypatch.setattr(llm_cog.settings, "TEMPORARY_MEMORY_ENABLED", True, raising=False)
+    monkeypatch.setattr(llm_cog.settings, "RECENT_CONTEXT_ENABLED", False, raising=False)
+    monkeypatch.setattr(llm_cog._tool_registry, "channel_history_lookup", fake_lookup)
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(
+        cog._ask(
+            cast(Any, msg),
+            "can you look up what had been discussed in the channel before?",
+        )
+    )
+
+    assert "[Extended channel context]" in seen_prompt["text"]
+    assert "math discussion" in seen_prompt["text"]
+    assert "Do not ask for a channel ID." in seen_prompt["text"]
+
+
+def test_ask_injects_extended_context_for_first_problem_in_channel_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    seen_prompt = {"text": ""}
+
+    def fake_lookup(*, channel_id, lookback=20, query=None, include_bot_messages=False):
+        assert channel_id == 123
+        assert include_bot_messages is True
+        return "Recent channel context (1 message(s), capped at 60):\n- [ts] PRTS: Random statistics problem"
+
+    def fake_chat(*args, **kwargs):
+        seen_prompt["text"] = args[0]
+        return "ok"
+
+    monkeypatch.setattr(llm_cog.settings, "TEMPORARY_MEMORY_ENABLED", True, raising=False)
+    monkeypatch.setattr(llm_cog.settings, "RECENT_CONTEXT_ENABLED", False, raising=False)
+    monkeypatch.setattr(llm_cog._tool_registry, "channel_history_lookup", fake_lookup)
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(
+        cog._ask(
+            cast(Any, msg),
+            "what was the first stats problem in this channel",
+        )
+    )
+
+    assert "[Extended channel context]" in seen_prompt["text"]
+    assert "Random statistics problem" in seen_prompt["text"]
+    assert "Do not ask for a channel ID." in seen_prompt["text"]
 
 
 def test_ask_injects_default_recent_context_for_every_prompt(

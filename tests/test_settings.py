@@ -18,6 +18,8 @@ def test_get_env_var_optional_missing_returns_none(monkeypatch: pytest.MonkeyPat
 def test_config_values_have_correct_types() -> None:
     assert isinstance(settings.LLM_PROVIDER, str)
     assert settings.LLM_PROVIDER in {"groq", "ollama"}
+    assert isinstance(settings.LLM_REQUEST_TIMEOUT_SECONDS, int)
+    assert settings.LLM_REQUEST_TIMEOUT_SECONDS >= 5
     assert isinstance(settings.REPLY_TRIGGER_ENABLED, bool)
     assert isinstance(settings.RECENT_CONTEXT_ENABLED, bool)
     assert isinstance(settings.RECENT_CONTEXT_MESSAGE_COUNT, int)

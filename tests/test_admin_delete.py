@@ -215,6 +215,8 @@ def test_delete_response_denied_for_non_admin(monkeypatch) -> None:
 def test_delete_response_deletes_consecutive_bot_messages(monkeypatch) -> None:
     """Bot messages before the command are collected and deleted."""
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    removed = []
+    monkeypatch.setattr("bot.cogs.admin.forget_discord_messages", lambda messages: removed.append(list(messages)))
 
     bot = DummyBot()
     cog = AdminCog(cast(Any, bot))
@@ -235,6 +237,7 @@ def test_delete_response_deletes_consecutive_bot_messages(monkeypatch) -> None:
     assert bot_msg2 in batch
     # The human message must NOT be deleted.
     assert human_msg not in batch
+    assert removed and removed[0] == [bot_msg1, bot_msg2]
 
 
 def test_delete_response_stops_at_first_human_message(monkeypatch) -> None:
@@ -363,6 +366,8 @@ def test_delete_count_negative_rejected(monkeypatch) -> None:
 def test_delete_count_valid_deletes_recent_channel_messages(monkeypatch) -> None:
     """delete count N deletes the most recent channel messages before the command."""
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    removed = []
+    monkeypatch.setattr("bot.cogs.admin.forget_discord_messages", lambda messages: removed.append(list(messages)))
 
     bot = DummyBot()
     cog = AdminCog(cast(Any, bot))
@@ -382,6 +387,7 @@ def test_delete_count_valid_deletes_recent_channel_messages(monkeypatch) -> None
     assert human_msg in batch
     assert bot_msg2 not in batch
     assert msg in batch  # command message is also deleted
+    assert removed and removed[0] == [bot_msg1, human_msg, msg]
 
 
 def test_delete_count_value_one_deletes_one_prior_message_and_command(monkeypatch) -> None:
@@ -482,10 +488,18 @@ def test_delete_time_invalid_duration(monkeypatch) -> None:
 
 def test_delete_time_valid_minutes_calls_purge(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    removed = []
+    monkeypatch.setattr("bot.cogs.admin.forget_discord_messages", lambda messages: removed.append(list(messages)))
 
     bot = DummyBot()
     cog = AdminCog(cast(Any, bot))
     msg = _DelMsg(user_id=42)
+
+    deleted_msg = _DelMsg(user_id=BOT_USER_ID, is_bot=True)
+    async def fake_purge(*, limit: int = 100, after=None, check=None, **kwargs) -> list:
+        msg.channel.purge_calls.append({"limit": limit, "after": after, "check": check})
+        return [deleted_msg]
+    msg.channel.purge = fake_purge  # type: ignore[assignment]
 
     before = dt.datetime.now(dt.timezone.utc)
     asyncio.run(cog._delete_time(cast(Any, msg), "delete time 30m"))
@@ -497,6 +511,7 @@ def test_delete_time_valid_minutes_calls_purge(monkeypatch) -> None:
     assert abs((call["after"] - expected_cutoff).total_seconds()) < 3
     # Must pass a check filter so only bot messages are deleted.
     assert call["check"] is not None
+    assert removed and removed[0] == [deleted_msg]
 
 
 def test_delete_time_check_filter_accepts_bot_rejects_user(monkeypatch) -> None:
