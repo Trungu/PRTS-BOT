@@ -1,13 +1,9 @@
 # main.py — entry point. Creates the Bot and starts the event loop.
-import os
-
-from dotenv import load_dotenv
-load_dotenv()
-
-print("SUPABASE_URL loaded:", bool(os.getenv("SUPABASE_URL")))
+import settings
 
 from bot import Bot
 from settings import DISCORD_TOKEN
 
 if __name__ == "__main__":
+    print("SUPABASE_URL loaded:", bool(settings.SUPABASE_URL))
     Bot().run(DISCORD_TOKEN)

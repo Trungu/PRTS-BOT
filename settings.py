@@ -227,3 +227,10 @@ CLIENT_SECRET = get_env_var("CLIENT_SECRET", required=False)
 OAUTH_BASE_URL = get_env_var("OAUTH_BASE_URL", required=False)
 OAUTH_REDIRECT_URI = get_env_var("OAUTH_REDIRECT_URI", required=False)
 GCAL_DB_PATH = get_env_var("GCAL_DB_PATH", required=False)
+
+# ---------------------------------------------------------------------------
+# Supabase
+# ---------------------------------------------------------------------------
+
+SUPABASE_URL = get_env_var("SUPABASE_URL", required=False)
+SUPABASE_SERVICE_ROLE_KEY = get_env_var("SUPABASE_SERVICE_ROLE_KEY", required=False)

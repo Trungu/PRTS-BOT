@@ -1,17 +1,18 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
-import os
+import settings
 
-# load_dotenv()
 _supabase = None
 
 def _client():
     global _supabase
     if _supabase is None:
+        if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+            raise RuntimeError("Supabase is not configured.")
         _supabase = create_client(
-            os.environ["SUPABASE_URL"],
-            os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+            settings.SUPABASE_URL,
+            settings.SUPABASE_SERVICE_ROLE_KEY,
         )
     return _supabase
 

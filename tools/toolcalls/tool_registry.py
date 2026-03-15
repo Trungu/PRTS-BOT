@@ -4,7 +4,6 @@ from typing import Callable
 from datetime import datetime, timedelta, timezone
 from calendar import monthrange
 import re
-import os
 import json
 from urllib.parse import quote
 
@@ -69,12 +68,17 @@ def _build_gcal_service(discord_user_id: int):
     if not refresh_token:
         raise ValueError("Google Calendar is not connected. Run /gcal connect first.")
 
+    client_id = settings.CLIENT_ID
+    client_secret = settings.CLIENT_SECRET
+    if not client_id or not client_secret:
+        raise ValueError("Google OAuth client is not configured.")
+
     creds = Credentials(
         token=None,
         refresh_token=refresh_token,
         token_uri=_TOKEN_URI,
-        client_id=os.environ["CLIENT_ID"],
-        client_secret=os.environ["CLIENT_SECRET"],
+        client_id=client_id,
+        client_secret=client_secret,
         scopes=_GCAL_SCOPES,
     )
     creds.refresh(Request())

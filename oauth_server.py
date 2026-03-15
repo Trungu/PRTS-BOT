@@ -1,42 +1,42 @@
-from dotenv import load_dotenv
-load_dotenv()
-
-import os
 from supabase import create_client
 
 from datetime import datetime, timezone
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
 from google_auth_oauthlib.flow import Flow
 from fastapi.responses import RedirectResponse
+import settings
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-GOOGLE_CLIENT_ID = os.getenv("CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")
+GOOGLE_CLIENT_ID = settings.CLIENT_ID
+GOOGLE_CLIENT_SECRET = settings.CLIENT_SECRET
+OAUTH_REDIRECT_URI = settings.OAUTH_REDIRECT_URI
 
 app = FastAPI()
 
 def supabase_client():
+    if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Supabase is not configured.")
     return create_client(
-        os.environ["SUPABASE_URL"],
-        os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+        settings.SUPABASE_URL,
+        settings.SUPABASE_SERVICE_ROLE_KEY,
     )
 
 @app.get("/health")
 def health():
     missing = []
-    for k in [
-        "SUPABASE_URL",
-        "SUPABASE_SERVICE_ROLE_KEY",
-        "CLIENT_ID",
-        "CLIENT_SECRET",
-        "OAUTH_REDIRECT_URI",
-    ]:
-        if not os.getenv(k):
-            missing.append(k)
+    checks = {
+        "SUPABASE_URL": settings.SUPABASE_URL,
+        "SUPABASE_SERVICE_ROLE_KEY": settings.SUPABASE_SERVICE_ROLE_KEY,
+        "CLIENT_ID": settings.CLIENT_ID,
+        "CLIENT_SECRET": settings.CLIENT_SECRET,
+        "OAUTH_REDIRECT_URI": settings.OAUTH_REDIRECT_URI,
+    }
+    for key, value in checks.items():
+        if not value:
+            missing.append(key)
     return {"ok": len(missing) == 0, "missing": missing}
 
 

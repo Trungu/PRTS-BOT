@@ -13,15 +13,12 @@ from googleapiclient.errors import HttpError
 
 # DISCORD IMPORTS
 import discord
-import os
-# from dotenv import load_dotenv
 from discord import app_commands
 from discord.ext import commands
-
-# load_dotenv()
+import settings
 
 # CONFIG
-OAUTH_BASE_URL = os.getenv("OAUTH_BASE_URL")
+OAUTH_BASE_URL = settings.OAUTH_BASE_URL
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
@@ -31,6 +28,14 @@ class GCal(commands.GroupCog, group_name="gcal"):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    @staticmethod
+    def _require_google_oauth_client() -> tuple[str, str]:
+        client_id = settings.CLIENT_ID
+        client_secret = settings.CLIENT_SECRET
+        if not client_id or not client_secret:
+            raise RuntimeError("Google OAuth client is not configured.")
+        return client_id, client_secret
 
 
     @staticmethod
@@ -59,12 +64,13 @@ class GCal(commands.GroupCog, group_name="gcal"):
 
     @staticmethod
     def _build_service(refresh_token: str):
+        client_id, client_secret = GCal._require_google_oauth_client()
         creds = Credentials(
             token=None,
             refresh_token=refresh_token,
             token_uri=TOKEN_URI,
-            client_id=os.environ["CLIENT_ID"],
-            client_secret=os.environ["CLIENT_SECRET"],
+            client_id=client_id,
+            client_secret=client_secret,
             scopes=SCOPES,
         )
         creds.refresh(Request())
@@ -372,14 +378,19 @@ class GCal(commands.GroupCog, group_name="gcal"):
         if not rt:
             await interaction.followup.send("You are not connected. Run `/gcal connect` first.", ephemeral=True)
             return
+        try:
+            client_id, client_secret = self._require_google_oauth_client()
+        except RuntimeError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
 
         def fetch_calendar_options() -> tuple[list[discord.SelectOption], dict[str, tuple[str, str]]]:
             creds = Credentials(
                 token=None,
                 refresh_token=rt,
                 token_uri=TOKEN_URI,
-                client_id=os.environ["CLIENT_ID"],
-                client_secret=os.environ["CLIENT_SECRET"],
+                client_id=client_id,
+                client_secret=client_secret,
                 scopes=SCOPES,
             )
             creds.refresh(Request())
@@ -458,14 +469,19 @@ class GCal(commands.GroupCog, group_name="gcal"):
         # if no selection, default to ["primary"]
         selected = await asyncio.to_thread(get_selected_calendars, interaction.user.id)
         calendar_ids = selected or ["primary"]
+        try:
+            client_id, client_secret = self._require_google_oauth_client()
+        except RuntimeError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
 
         def fetch():
             creds = Credentials(
                 token=None,
                 refresh_token=rt,
                 token_uri=TOKEN_URI,
-                client_id=os.environ["CLIENT_ID"],
-                client_secret=os.environ["CLIENT_SECRET"],
+                client_id=client_id,
+                client_secret=client_secret,
                 scopes=SCOPES,
             )
             creds.refresh(Request())
@@ -568,14 +584,19 @@ class GCal(commands.GroupCog, group_name="gcal"):
                 ephemeral=True,
             )
             return
+        try:
+            client_id, client_secret = self._require_google_oauth_client()
+        except RuntimeError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
 
         def auth_check() -> tuple[bool, str]:
             creds = Credentials(
                 token=None,
                 refresh_token=rt,
                 token_uri=TOKEN_URI,
-                client_id=os.environ["CLIENT_ID"],
-                client_secret=os.environ["CLIENT_SECRET"],
+                client_id=client_id,
+                client_secret=client_secret,
                 scopes=SCOPES,
             )
             creds.refresh(Request())
