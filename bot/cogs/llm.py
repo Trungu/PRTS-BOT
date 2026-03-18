@@ -76,6 +76,14 @@ _SENSITIVE_TOOL_KEY_RE: re.Pattern[str] = re.compile(
 _TOOL_INVENTORY_LEAK_RE: re.Pattern[str] = re.compile(
     r"(?is)\b(commands?|functions?)\b.{0,80}\b(can run|available|reference)\b"
 )
+_PERSONALIZED_OPENING_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:hey|hi|hello|sure thing|got it|okay|ok|thanks|thank you)[,!\s]+"
+    r"(?:<@!?\d+>|@[\w.\-]{2,32}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})[!,.:\- ]*",
+    re.IGNORECASE,
+)
+_LEADING_MENTION_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:<@!?\d+>|@[\w.\-]{2,32})[,:!\-\s]+"
+)
 def _format_iso_brief(iso_str: str | None) -> str:
     if not iso_str:
         return "N/A"
@@ -139,6 +147,21 @@ def _looks_like_internal_tool_inventory(reply: str) -> bool:
             if hits >= 2:
                 return True
     return False
+
+
+def _strip_personalized_addressing(reply: str) -> str:
+    """Remove personalized greeting prefixes like 'Sure thing, @Name!'."""
+    text = reply.strip()
+    if not text:
+        return text
+
+    for _ in range(2):
+        updated = _PERSONALIZED_OPENING_RE.sub("", text, count=1).lstrip()
+        updated = _LEADING_MENTION_RE.sub("", updated, count=1).lstrip()
+        if updated == text:
+            break
+        text = updated
+    return text
 
 
 def _extract_reply_context(message: discord.Message) -> str | None:
@@ -911,6 +934,7 @@ class LLM(commands.Cog):
                 # would expose internal tags to the Discord channel.
                 reply = _SAFETY_SENTINEL_RE.sub("", reply).strip()
                 reply = _GCAL_CONFLICT_RE.sub("", reply).strip()
+                reply = _strip_personalized_addressing(reply)
                 if _looks_like_internal_tool_inventory(reply):
                     log(
                         f"[LLM] Internal tool inventory leak blocked for {message.author}",

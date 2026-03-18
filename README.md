@@ -5,7 +5,7 @@
 ![Status](https://img.shields.io/badge/status-work%20in%20progress-orange)
 ![Open Source](https://img.shields.io/badge/open%20source-yes-2ea44f)
 
-PRTS is an AI-enabled Discord bot designed for technical communities. It provides conversational assistance, tool-driven workflows, and Google Calendar automation with a focus on safety, privacy, and operational control.
+PRTS is a Discord bot built to unify your workflows in one place through integrations, enhanced by AI. It provides conversational assistance, tool-driven workflows, Google Calendar automation, and a reminder system.
 
 > NOTE: PRTS is actively evolving and remains a work in progress.
 
@@ -18,10 +18,13 @@ PRTS is an AI-enabled Discord bot designed for technical communities. It provide
   - terminal command execution in an isolated sandbox
   - engineering/scientific unit conversion
 - Google Calendar integration:
-  - connect/disconnect flow via OAuth
+  - connect flow via OAuth
   - create, find, remove events
   - set event reminders
   - support for natural-language scheduling via tool calls
+- To-do assistant:
+  - `/todo_start`, `/dump`, and `/list` slash commands
+  - periodic DM reminder loop for overdue pending tasks
 - Safety responses for crisis content and politically sensitive requests.
 - Message-level controls:
   - user rate limiting with warning, hard-limit, and cooldown stages
