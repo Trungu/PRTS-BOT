@@ -35,6 +35,18 @@ def test_config_values_have_correct_types() -> None:
     assert isinstance(settings.PREFIX_SMART_CHARS, list)
     assert all(isinstance(c, str) for c in settings.PREFIX_SMART_CHARS)
     assert isinstance(settings.PREFIX_CASE_SENSITIVE, bool)
+    assert isinstance(settings.KATEX_MAX_WIDTH_PX, int)
+    assert settings.KATEX_MAX_WIDTH_PX >= 200
+    assert isinstance(settings.KATEX_MAX_HEIGHT_PX, int)
+    assert settings.KATEX_MAX_HEIGHT_PX >= 80
+    assert isinstance(settings.LATEX_RENDERER, str)
+    assert settings.LATEX_RENDERER in {"mathjax", "matplotlib"}
+    assert isinstance(settings.LATEX_RENDERER_FALLBACK, bool)
+    assert isinstance(settings.KATEX_RENDER_SCALE, float)
+    assert settings.KATEX_RENDER_SCALE >= 0.3
+    assert isinstance(settings.KATEX_ADAPTIVE_SCALE, bool)
+    assert isinstance(settings.KATEX_RENDER_PAD_PX, int)
+    assert settings.KATEX_RENDER_PAD_PX >= 0
     assert isinstance(settings.TOOLCALL_SILENT, bool)
     assert isinstance(settings.SHOW_TOOLCALL_NOTICES, bool)
     assert isinstance(settings.GLOBAL_SILENT, bool)

@@ -11,6 +11,7 @@ from typing import cast
 from urllib.parse import unquote
 
 import discord
+from discord.http import Route
 from discord.ext import commands
 
 from bot.client import Bot
@@ -84,6 +85,14 @@ _PERSONALIZED_OPENING_RE: re.Pattern[str] = re.compile(
 _LEADING_MENTION_RE: re.Pattern[str] = re.compile(
     r"^\s*(?:<@!?\d+>|@[\w.\-]{2,32})[,:!\-\s]+"
 )
+_LOW_VALUE_LINE_RE: re.Pattern[str] = re.compile(r"^[`~*_#>\-=:;.,]+$")
+_LOW_VALUE_ENUM_LINE_RE: re.Pattern[str] = re.compile(r"^\d+\.$")
+_LEADING_ENUM_PREFIX_RE: re.Pattern[str] = re.compile(r"^\d+\.\s+")
+_FILLER_LINE_SET = {"then", "let", "so", "thus", "hence", "therefore", "and", "or", "for"}
+_UNESCAPED_DOLLAR_BLOCK_RE: re.Pattern[str] = re.compile(r"(?<!\\)\$.*?(?<!\\)\$", re.DOTALL)
+_SIMPLE_SYMBOL_RE: re.Pattern[str] = re.compile(r"^\$?[A-Za-z](?:_[A-Za-z0-9]+)?(?:\^\d+)?\$?$")
+_DEFN_START_RE: re.Pattern[str] = re.compile(r"^(?:is|denotes|represents|stands for)\b", re.IGNORECASE)
+_TRAIL_PUNCT_RE: re.Pattern[str] = re.compile(r"[.,;:]+$")
 def _format_iso_brief(iso_str: str | None) -> str:
     if not iso_str:
         return "N/A"
@@ -365,6 +374,442 @@ async def _send(channel: discord.abc.Messageable, content: str, *, force_silent:
         await channel.send(content)
 
 
+def _split_v2_text_blocks(text: str, *, limit: int = 3500) -> list[str]:
+    """Split text into V2-safe blocks for Text Display components."""
+    text = text.strip()
+    if not text:
+        return []
+    return [text[i : i + limit] for i in range(0, len(text), limit)]
+
+
+def _compact_v2_text(text: str) -> str:
+    """Remove low-value spacer lines and collapse excess whitespace."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    kept: list[str] = []
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        stripped = re.sub(r"^[\-*•]+\s*", "", stripped)
+        stripped = _LEADING_ENUM_PREFIX_RE.sub("", stripped)
+        stripped = stripped.replace("**", "").replace("__", "").replace("`", "")
+        if stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
+            stripped = stripped[2:-2].strip()
+        if not stripped:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        if _LOW_VALUE_LINE_RE.fullmatch(stripped):
+            continue
+        if _LOW_VALUE_ENUM_LINE_RE.fullmatch(stripped):
+            continue
+        if stripped.startswith(",") or stripped.startswith(";"):
+            continue
+        if stripped.lower() in _FILLER_LINE_SET:
+            continue
+        kept.append(stripped)
+
+    # Merge patterns like:
+    #   where
+    #   C
+    #   is the constant ...
+    merged: list[str] = []
+    i = 0
+    while i < len(kept):
+        if i + 2 < len(kept):
+            a = kept[i].strip()
+            b = kept[i + 1].strip()
+            c = kept[i + 2].strip()
+            if (
+                a.lower() in {"where", "with"}
+                and _SIMPLE_SYMBOL_RE.fullmatch(b)
+                and _DEFN_START_RE.match(c)
+            ):
+                merged.append(f"{a} {b} {c}")
+                i += 3
+                continue
+        if i + 1 < len(kept):
+            a = kept[i].strip()
+            b = kept[i + 1].strip()
+            if _SIMPLE_SYMBOL_RE.fullmatch(a) and b.endswith(":"):
+                merged.append(f"{a} {b}")
+                i += 2
+                continue
+        merged.append(kept[i])
+        i += 1
+
+    while merged and merged[0] == "":
+        merged.pop(0)
+    while merged and merged[-1] == "":
+        merged.pop()
+
+    return "\n".join(merged).strip()
+
+
+def _rescue_embedded_math_in_text_segments(segments: list[dict]) -> list[dict]:
+    """Re-parse text segments containing `$...$` to catch leaked math blocks."""
+    rescued: list[dict] = []
+    for seg in segments:
+        if seg.get("type") != "text":
+            rescued.append(seg)
+            continue
+        content = str(seg.get("content", ""))
+        if content.count("$") < 2:
+            rescued.append(seg)
+            continue
+        parsed = katex_formatter.parse_math_segments(content)
+        if any(p.get("type") == "math" for p in parsed):
+            rescued.extend(parsed)
+        else:
+            rescued.append(seg)
+    return rescued
+
+
+def _normalize_reply_for_math_parse(reply: str) -> str:
+    """Normalize common escaped delimiters before math segmentation."""
+    normalized = reply
+    # Models sometimes escape inline delimiters as `\$...$` or `\$...\$`.
+    normalized = normalized.replace(r"\$", "$")
+    return normalized
+
+
+def _split_text_with_dollar_math_fallback(text: str) -> list[dict]:
+    """Fallback parser for single-dollar math when regex misses edge cases."""
+    out: list[dict] = []
+    i = 0
+    n = len(text)
+
+    def _is_single_dollar(pos: int) -> bool:
+        if text[pos] != "$":
+            return False
+        if pos > 0 and text[pos - 1] == "\\":
+            return False
+        if (pos > 0 and text[pos - 1] == "$") or (pos + 1 < n and text[pos + 1] == "$"):
+            return False
+        return True
+
+    while i < n:
+        start = -1
+        for p in range(i, n):
+            if _is_single_dollar(p):
+                start = p
+                break
+        if start < 0:
+            tail = text[i:]
+            if tail:
+                out.append({"type": "text", "content": tail})
+            break
+
+        if start > i:
+            out.append({"type": "text", "content": text[i:start]})
+
+        end = -1
+        for p in range(start + 1, n):
+            if _is_single_dollar(p):
+                end = p
+                break
+
+        if end < 0:
+            # unmatched opening delimiter; keep literal remainder as text
+            out.append({"type": "text", "content": text[start:]})
+            break
+
+        expr = text[start + 1 : end].strip()
+        if expr:
+            out.append({"type": "math", "expression": expr})
+        i = end + 1
+
+    return out
+
+
+def _contains_unrendered_dollar_math(segments: list[dict]) -> bool:
+    """Return True if text segments still contain unrendered `$...$` blocks."""
+    for seg in segments:
+        if seg.get("type") != "text":
+            continue
+        content = str(seg.get("content", ""))
+        if _UNESCAPED_DOLLAR_BLOCK_RE.search(content):
+            return True
+    return False
+
+
+def _normalize_math_for_dedupe(expression: str) -> str:
+    expr = _TRAIL_PUNCT_RE.sub("", expression.strip())
+    return re.sub(r"\s+", "", expr).lower()
+
+
+def _boxed_expression(expression: str) -> str:
+    """Wrap expression in \\boxed{...} unless already boxed."""
+    expr = str(expression).strip()
+    if not expr:
+        return expr
+    if re.match(r"^\\boxed\s*\{", expr):
+        return expr
+    return rf"\boxed{{{expr}}}"
+
+
+def _optimize_segments_for_layout(segments: list[dict]) -> list[dict]:
+    """Compact text and dedupe adjacent repeated math for cleaner layout."""
+    optimized: list[dict] = []
+    prev_math_norm: str | None = None
+
+    for seg in segments:
+        seg_type = seg.get("type")
+        if seg_type == "text":
+            compact = _compact_v2_text(str(seg.get("content", "")))
+            if not compact:
+                continue
+            if optimized and optimized[-1].get("type") == "text":
+                merged = f"{optimized[-1]['content']}\n{compact}".strip()
+                optimized[-1]["content"] = _compact_v2_text(merged)
+            else:
+                optimized.append({"type": "text", "content": compact})
+            continue
+
+        if seg_type == "math":
+            expr = str(seg.get("expression", "")).strip()
+            if not expr:
+                continue
+            norm = _normalize_math_for_dedupe(expr)
+            if prev_math_norm is not None and norm == prev_math_norm:
+                continue
+            optimized.append({"type": "math", "expression": expr})
+            prev_math_norm = norm
+            continue
+
+        optimized.append(seg)
+
+    return optimized
+
+
+def _finalize_math_segments(reply: str) -> list[dict]:
+    """Run layered parsing and rescue so math blocks are not leaked as text."""
+    normalized = _normalize_reply_for_math_parse(reply)
+    segments = katex_formatter.parse_math_segments(normalized)
+    segments = _rescue_embedded_math_in_text_segments(segments)
+
+    if _contains_unrendered_dollar_math(segments):
+        expanded: list[dict] = []
+        for seg in segments:
+            if seg.get("type") != "text":
+                expanded.append(seg)
+                continue
+            content = str(seg.get("content", ""))
+            if _UNESCAPED_DOLLAR_BLOCK_RE.search(content):
+                expanded.extend(_split_text_with_dollar_math_fallback(content))
+            else:
+                expanded.append(seg)
+        segments = expanded
+
+    return _optimize_segments_for_layout(segments)
+
+
+def _build_segment_units(segments: list[dict]) -> list[dict]:
+    """Normalize segments into ordered text/math units."""
+    units: list[dict] = []
+    math_idx = 0
+    for seg in segments:
+        seg_type = seg.get("type")
+        if seg_type == "text":
+            compact = _compact_v2_text(str(seg.get("content", "")))
+            for block in _split_v2_text_blocks(compact):
+                if (
+                    units
+                    and units[-1].get("type") == "text"
+                    and len(str(units[-1].get("content", ""))) + len(block) + 1 <= 3500
+                ):
+                    units[-1]["content"] = f"{units[-1]['content']}\n{block}"
+                else:
+                    units.append({"type": "text", "content": block})
+            continue
+        if seg_type == "math":
+            units.append({"type": "math", "math_idx": math_idx})
+            math_idx += 1
+    return units
+
+
+def _chunk_segment_units(
+    units: list[dict],
+    *,
+    max_math_per_message: int = 10,
+    max_components_per_message: int = 36,
+) -> list[list[dict]]:
+    """Split ordered units into message-sized chunks under Discord limits."""
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    current_math = 0
+    current_components = 0
+
+    for unit in units:
+        is_math = unit.get("type") == "math"
+        would_overflow_math = is_math and current_math >= max_math_per_message
+        unit_components = 2 if is_math else 1  # math + small separator
+        would_overflow_components = current_components + unit_components > max_components_per_message
+
+        if current and (would_overflow_math or would_overflow_components):
+            batches.append(current)
+            current = []
+            current_math = 0
+            current_components = 0
+
+        current.append(unit)
+        current_components += unit_components
+        if is_math:
+            current_math += 1
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _build_math_v2_components(
+    units: list[dict],
+    math_media_urls: dict[int, str],
+    *,
+    title: str = "## LaTeX Output",
+) -> list[dict]:
+    """Construct V2 components that preserve text/math segment order."""
+    card_components: list[dict] = [{"type": 10, "content": title}]
+
+    for unit in units:
+        if unit.get("type") == "text":
+            card_components.append({"type": 10, "content": str(unit.get("content", ""))})
+            continue
+
+        if unit.get("type") == "math":
+            math_idx = int(unit.get("math_idx", -1))
+            if math_idx < 0:
+                continue
+            media_url = str(math_media_urls.get(math_idx, "")).strip()
+            if not media_url:
+                continue
+            card_components.append(
+                {
+                    "type": 12,
+                    "items": [{"media": {"url": media_url}}],
+                }
+            )
+            card_components.append({"type": 14, "divider": False, "spacing": 1})
+
+    return [{"type": 17, "components": card_components}]
+
+
+async def _send_math_bundle_components_v2(
+    channel: discord.abc.Messageable,
+    *,
+    segments: list[dict],
+    png_paths: list,
+    force_silent: bool = False,
+    reply_to: discord.Message | None = None,
+) -> bool:
+    """Send one message with all math files, then upgrade it to Components V2.
+
+    Returns ``True`` once a single bundled message has been delivered (whether
+    V2 patch succeeds or not), and ``False`` only if no bundled send occurred.
+    """
+    if not png_paths:
+        return False
+
+    all_filenames = [f"latex_{idx + 1}.png" for idx in range(len(png_paths))]
+    units = _build_segment_units(segments)
+    if not units:
+        return False
+    batches = _chunk_segment_units(units)
+    total_batches = len(batches)
+
+    explanation_chunks = [
+        str(seg.get("content", "")).strip()
+        for seg in segments
+        if seg.get("type") == "text" and str(seg.get("content", "")).strip()
+    ]
+    explanation = "\n\n".join(explanation_chunks).strip()
+    fallback_content = explanation[:1800] if explanation else "Rendered LaTeX output."
+
+    first_send = True
+    for batch_idx, batch_units in enumerate(batches, start=1):
+        math_indices = [
+            int(unit.get("math_idx"))
+            for unit in batch_units
+            if unit.get("type") == "math" and isinstance(unit.get("math_idx"), int)
+        ]
+        files = [
+            discord.File(str(png_paths[idx]), filename=all_filenames[idx])
+            for idx in math_indices
+            if 0 <= idx < len(png_paths)
+        ]
+        try:
+            kwargs: dict = {"files": files}
+            if _should_silent_all() or force_silent:
+                kwargs["silent"] = True
+            if reply_to is not None and first_send:
+                sent_message = await reply_to.reply(fallback_content, **kwargs)
+            else:
+                sent_message = await channel.send(fallback_content, **kwargs)
+        except Exception as exc:
+            log(
+                f"[LLM] Failed to send bundled LaTeX message: {exc}",
+                LogLevel.ERROR,
+            )
+            return False
+        first_send = False
+
+        # If the send succeeded but we cannot patch to V2, keep fallback message.
+        try:
+            attachments = list(getattr(sent_message, "attachments", []) or [])
+            if not attachments:
+                continue
+
+            state = getattr(sent_message, "_state", None)
+            http = getattr(state, "http", None) if state is not None else None
+            if http is None:
+                continue
+
+            msg_flags = int(getattr(getattr(sent_message, "flags", None), "value", 0) or 0)
+            keep_attachments = [
+                {
+                    "id": int(getattr(att, "id")),
+                    "filename": str(getattr(att, "filename")),
+                }
+                for att in attachments
+                if getattr(att, "id", None) is not None and getattr(att, "filename", None) is not None
+            ]
+            math_media_urls: dict[int, str] = {}
+            for idx, att in enumerate(attachments):
+                if idx >= len(math_indices):
+                    break
+                media_url = str(getattr(att, "url", "") or "").strip()
+                if media_url:
+                    math_media_urls[math_indices[idx]] = media_url
+
+            title = "## LaTeX Output"
+            if total_batches > 1:
+                title = f"## LaTeX Output ({batch_idx}/{total_batches})"
+            payload = {
+                "flags": msg_flags | (1 << 15),  # IS_COMPONENTS_V2
+                "content": None,
+                "embeds": [],
+                "attachments": keep_attachments,
+                "components": _build_math_v2_components(
+                    batch_units,
+                    math_media_urls,
+                    title=title,
+                ),
+            }
+            route = Route(
+                "PATCH",
+                "/channels/{channel_id}/messages/{message_id}",
+                channel_id=getattr(sent_message.channel, "id"),
+                message_id=getattr(sent_message, "id"),
+            )
+            await http.request(route, json=payload)
+        except Exception as exc:
+            log(
+                f"[LLM] Bundled message sent, but Components V2 patch failed; keeping fallback message: {exc}",
+                LogLevel.WARNING,
+            )
+    return True
+
+
 async def _send_reply_with_math(
     channel: discord.abc.Messageable,
     reply: str,
@@ -385,7 +830,7 @@ async def _send_reply_with_math(
     Discord reply to that message so the context is visually linked in the
     channel.  All subsequent chunks are sent as regular channel messages.
     """
-    segments = katex_formatter.parse_math_segments(reply)
+    segments = _finalize_math_segments(reply)
 
     math_count = sum(1 for s in segments if s["type"] == "math")
     if math_count:
@@ -394,8 +839,49 @@ async def _send_reply_with_math(
             LogLevel.DEBUG,
         )
 
+    # Fast path: when we have expressions, bundle them into one message and
+    # attempt a Components V2 upgrade that preserves segment order.
+    if math_count > 0:
+        rendered_paths = []
+        rendered_math_idx = 0
+        try:
+            for seg in segments:
+                if seg["type"] != "math":
+                    continue
+                expr = str(seg["expression"])
+                if rendered_math_idx == math_count - 1:
+                    expr = _boxed_expression(expr)
+                rendered_paths.append(
+                    await asyncio.to_thread(katex_formatter.render, expr)
+                )
+                rendered_math_idx += 1
+        except Exception as exc:
+            log(
+                f"[LLM] Bundled LaTeX render path failed; reverting to per-segment send: {exc}",
+                LogLevel.WARNING,
+            )
+            for path in rendered_paths:
+                katex_formatter.cleanup(path)
+            rendered_paths.clear()
+
+        if rendered_paths:
+            try:
+                handled = await _send_math_bundle_components_v2(
+                    channel,
+                    segments=segments,
+                    png_paths=rendered_paths,
+                    force_silent=force_silent,
+                    reply_to=reply_to,
+                )
+                if handled:
+                    return
+            finally:
+                for path in rendered_paths:
+                    katex_formatter.cleanup(path)
+
     _replied = False  # True once the first chunk has been sent as a Discord reply
 
+    math_seen = 0
     for seg in segments:
         if seg["type"] == "text":
             if settings.SMART_CUTOFF:
@@ -413,7 +899,10 @@ async def _send_reply_with_math(
                     else:
                         await _send(channel, chunk, force_silent=force_silent)
         else:
-            expr = seg["expression"]
+            expr = str(seg["expression"])
+            if math_seen == math_count - 1:
+                expr = _boxed_expression(expr)
+            math_seen += 1
             try:
                 png_path = await asyncio.to_thread(katex_formatter.render, expr)
                 try:

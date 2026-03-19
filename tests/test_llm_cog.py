@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -63,6 +64,243 @@ class DummyBot:
 
     def set_llm_handler(self, handler):
         self.handler = handler
+
+
+def test_compact_v2_text_drops_low_value_lines() -> None:
+    text = "Step 1\n\nLet\n\n.\n\nx = 1\n---\nThen\n\nDone"
+    compact = llm_cog._compact_v2_text(text)
+    assert "Let" not in compact
+    assert "Then" not in compact
+    assert "\n.\n" not in compact
+    assert "---" not in compact
+    assert "Step 1" in compact
+    assert "x = 1" in compact
+
+
+def test_compact_v2_text_drops_numeric_markers_and_leading_commas() -> None:
+    text = "1.\n, use substitution\nActual content"
+    compact = llm_cog._compact_v2_text(text)
+    assert "1." not in compact
+    assert ", use substitution" not in compact
+    assert "Actual content" in compact
+
+
+def test_compact_v2_text_merges_where_symbol_definition_lines() -> None:
+    text = "where\nC\nis the constant of integration."
+    compact = llm_cog._compact_v2_text(text)
+    assert compact == "where C is the constant of integration."
+
+
+def test_compact_v2_text_strips_markdown_artifacts_and_prefix_numbering() -> None:
+    text = "**Step 1 - Replace**\n2. For\nx"
+    compact = llm_cog._compact_v2_text(text)
+    assert "**" not in compact
+    assert "2. For" not in compact
+    assert "Step 1 - Replace" in compact
+
+
+def test_rescue_embedded_math_in_text_segments_extracts_math() -> None:
+    segments = [{"type": "text", "content": "Then $x^2 + 1$ done"}]
+    rescued = llm_cog._rescue_embedded_math_in_text_segments(segments)
+    assert any(seg["type"] == "math" for seg in rescued)
+    assert any(seg["type"] == "text" for seg in rescued)
+
+
+def test_finalize_math_segments_normalizes_escaped_dollars() -> None:
+    segs = llm_cog._finalize_math_segments(r"Then \$x^2 + 1\$ done")
+    assert any(seg["type"] == "math" and "x^2 + 1" in seg["expression"] for seg in segs)
+
+
+def test_split_text_with_dollar_math_fallback_extracts_multiline_block() -> None:
+    text = "before $\\int x\\,dx\n= \\frac{1}{2}x^2 + C$ after"
+    segs = llm_cog._split_text_with_dollar_math_fallback(text)
+    assert any(seg["type"] == "math" for seg in segs)
+    assert any(seg["type"] == "text" for seg in segs)
+
+
+def test_optimize_segments_for_layout_dedupes_adjacent_math() -> None:
+    segments = [
+        {"type": "text", "content": "Step 1"},
+        {"type": "math", "expression": r"\frac{x}{2}"},
+        {"type": "math", "expression": r"\frac{x}{2} ."},
+    ]
+    optimized = llm_cog._optimize_segments_for_layout(segments)
+    math = [s for s in optimized if s["type"] == "math"]
+    assert len(math) == 1
+
+
+def test_boxed_expression_wraps_when_needed() -> None:
+    assert llm_cog._boxed_expression("x+1") == r"\boxed{x+1}"
+    assert llm_cog._boxed_expression(r"\boxed{x+1}") == r"\boxed{x+1}"
+
+
+def test_send_reply_with_math_bundles_multiple_expressions_into_single_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class BundleChannel(DummyChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.http_calls: list[tuple[Any, dict]] = []
+
+        async def send(self, content, **kwargs):
+            self.sent.append((content, kwargs))
+
+            class _HTTP:
+                def __init__(self, outer):
+                    self._outer = outer
+
+                async def request(self, route, json):
+                    self._outer.http_calls.append((route, json))
+
+            files = list(kwargs.get("files", []))
+            attachments = []
+            for idx, file_obj in enumerate(files):
+                attachments.append(
+                    type(
+                        "Attachment",
+                        (),
+                        {
+                            "id": idx,
+                            "filename": file_obj.filename,
+                            "url": f"https://cdn.discordapp.com/attachments/test/{file_obj.filename}",
+                        },
+                    )()
+                )
+
+            sent_message = type("SentMessage", (), {})()
+            sent_message.id = 987654321
+            sent_message.channel = self
+            sent_message.flags = type("Flags", (), {"value": 0})()
+            sent_message.attachments = attachments
+            sent_message._state = type("State", (), {"http": _HTTP(self)})()
+            return sent_message
+
+    segments = [
+        {"type": "text", "content": "Here are the results."},
+        {"type": "math", "expression": "x^2"},
+        {"type": "text", "content": "And one more."},
+        {"type": "math", "expression": "y^2"},
+    ]
+    rendered_paths = {
+        "x^2": tmp_path / "x2.png",
+        "y^2": tmp_path / "y2.png",
+    }
+    for path in rendered_paths.values():
+        path.write_bytes(b"png")
+
+    cleaned: list[Path] = []
+    monkeypatch.setattr(
+        llm_cog.katex_formatter,
+        "parse_math_segments",
+        lambda _text: segments,
+    )
+    monkeypatch.setattr(
+        llm_cog.katex_formatter,
+        "render",
+        lambda expr: rendered_paths[expr],
+    )
+    monkeypatch.setattr(
+        llm_cog.katex_formatter,
+        "cleanup",
+        lambda p: cleaned.append(p),
+    )
+
+    channel = BundleChannel()
+    asyncio.run(
+        llm_cog._send_reply_with_math(
+            cast(Any, channel),
+            "ignored",
+            reply_to=None,
+        )
+    )
+
+    assert len(channel.sent) == 1
+    sent_content, sent_kwargs = channel.sent[0]
+    assert "Here are the results." in sent_content
+    assert "And one more." in sent_content
+    assert len(sent_kwargs.get("files", [])) == 2
+
+    assert len(channel.http_calls) == 1
+    _route, payload = channel.http_calls[0]
+    assert payload["flags"] & (1 << 15)
+    assert payload["content"] is None
+    assert payload["components"][0]["type"] == 17
+    card = payload["components"][0]["components"]
+    assert card[0]["type"] == 10
+    assert card[1]["type"] == 10
+    assert card[2]["type"] == 12
+    assert card[3]["type"] == 14
+    assert card[4]["type"] == 10
+    assert card[5]["type"] == 12
+    assert card[6]["type"] == 14
+
+    assert cleaned == [rendered_paths["x^2"], rendered_paths["y^2"]]
+
+
+def test_send_reply_with_math_splits_when_more_than_ten_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class BundleChannel(DummyChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.http_calls: list[tuple[Any, dict]] = []
+
+        async def send(self, content, **kwargs):
+            self.sent.append((content, kwargs))
+
+            class _HTTP:
+                def __init__(self, outer):
+                    self._outer = outer
+
+                async def request(self, route, json):
+                    self._outer.http_calls.append((route, json))
+
+            files = list(kwargs.get("files", []))
+            attachments = []
+            for idx, file_obj in enumerate(files):
+                attachments.append(
+                    type(
+                        "Attachment",
+                        (),
+                        {
+                            "id": idx,
+                            "filename": file_obj.filename,
+                            "url": f"https://cdn.discordapp.com/attachments/test/{file_obj.filename}",
+                        },
+                    )()
+                )
+
+            sent_message = type("SentMessage", (), {})()
+            sent_message.id = 987654321 + len(self.sent)
+            sent_message.channel = self
+            sent_message.flags = type("Flags", (), {"value": 0})()
+            sent_message.attachments = attachments
+            sent_message._state = type("State", (), {"http": _HTTP(self)})()
+            return sent_message
+
+    segments: list[dict] = []
+    rendered_paths: dict[str, Path] = {}
+    for i in range(15):
+        expr = f"x_{i}"
+        segments.append({"type": "text", "content": f"Step {i + 1}"})
+        segments.append({"type": "math", "expression": expr})
+        p = tmp_path / f"{expr}.png"
+        p.write_bytes(b"png")
+        rendered_paths[expr] = p
+
+    monkeypatch.setattr(llm_cog.katex_formatter, "parse_math_segments", lambda _text: segments)
+    monkeypatch.setattr(llm_cog.katex_formatter, "render", lambda expr: rendered_paths[expr])
+    monkeypatch.setattr(llm_cog.katex_formatter, "cleanup", lambda _p: None)
+
+    channel = BundleChannel()
+    asyncio.run(llm_cog._send_reply_with_math(cast(Any, channel), "ignored", reply_to=None))
+
+    assert len(channel.sent) == 2
+    assert len(channel.sent[0][1].get("files", [])) == 10
+    assert len(channel.sent[1][1].get("files", [])) == 5
+    assert len(channel.http_calls) == 2
 
 
 def test_send_uses_silent_flag_when_forced() -> None:

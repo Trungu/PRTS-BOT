@@ -1,0 +1,9 @@
+{
+  "name": "prts-mathjax-renderer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "MathJax SVG renderer for PRTS bot",
+  "dependencies": {
+    "mathjax-full": "^3.2.2"
+  }
+}

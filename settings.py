@@ -60,6 +60,17 @@ def _parse_int(value: str | None, default: int, *, min_value: int = 1) -> int:
     return max(parsed, min_value)
 
 
+def _parse_float(value: str | None, default: float, *, min_value: float = 0.0) -> float:
+    """Parse a float env var with fallback and minimum clamp."""
+    if value is None:
+        return default
+    try:
+        parsed = float(value.strip())
+    except Exception:
+        return default
+    return max(parsed, min_value)
+
+
 def _parse_choice(value: str | None, default: str, allowed: set[str]) -> str:
     """Parse a case-insensitive enum-like env var with fallback."""
     if value is None:
@@ -187,10 +198,58 @@ KATEX_BG_COLOR: str = "none"
 KATEX_FG_COLOR: str = "#CCCCCC"
 
 # Font size in points.
-KATEX_FONT_SIZE: int = 18
+KATEX_FONT_SIZE: int = 16
 
 # DPI of the saved PNG.
 KATEX_DPI: int = 200
+
+# Math renderer backend. "mathjax" gives better typography and broader LaTeX
+# compatibility; "matplotlib" keeps the existing pure-Python path.
+LATEX_RENDERER: str = _parse_choice(
+    get_env_var("LATEX_RENDERER", required=False),
+    "mathjax",
+    {"mathjax", "matplotlib"},
+)
+
+# If True, fall back to matplotlib when mathjax backend is unavailable/fails.
+LATEX_RENDERER_FALLBACK: bool = _parse_bool(
+    get_env_var("LATEX_RENDERER_FALLBACK", required=False),
+    True,
+)
+
+# Global multiplier applied to KATEX_FONT_SIZE before rendering.
+# Useful for quickly shrinking all formulas without prompt changes.
+KATEX_RENDER_SCALE: float = _parse_float(
+    get_env_var("KATEX_RENDER_SCALE", required=False),
+    0.72,
+    min_value=0.3,
+)
+
+# If True, renderer applies extra scale-down for long/complex expressions.
+KATEX_ADAPTIVE_SCALE: bool = _parse_bool(
+    get_env_var("KATEX_ADAPTIVE_SCALE", required=False),
+    True,
+)
+
+# Padding around rendered math, in pixels.
+KATEX_RENDER_PAD_PX: int = _parse_int(
+    get_env_var("KATEX_RENDER_PAD_PX", required=False),
+    6,
+    min_value=0,
+)
+
+# Max rendered math image dimensions in pixels. Expressions larger than this
+# are scaled down proportionally to keep Discord output visually consistent.
+KATEX_MAX_WIDTH_PX: int = _parse_int(
+    get_env_var("KATEX_MAX_WIDTH_PX", required=False),
+    640,
+    min_value=200,
+)
+KATEX_MAX_HEIGHT_PX: int = _parse_int(
+    get_env_var("KATEX_MAX_HEIGHT_PX", required=False),
+    140,
+    min_value=80,
+)
 
 # ---------------------------------------------------------------------------
 # Silent mode
