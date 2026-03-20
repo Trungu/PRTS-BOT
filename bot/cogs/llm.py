@@ -538,9 +538,14 @@ def _normalize_math_for_dedupe(expression: str) -> str:
     return re.sub(r"\s+", "", expr).lower()
 
 
+def _sanitize_math_expression_for_render(expression: str) -> str:
+    """Remove trailing prose punctuation before math rendering."""
+    return _TRAIL_PUNCT_RE.sub("", str(expression).strip())
+
+
 def _boxed_expression(expression: str) -> str:
     """Wrap expression in \\boxed{...} unless already boxed."""
-    expr = str(expression).strip()
+    expr = _sanitize_math_expression_for_render(expression)
     if not expr:
         return expr
     if re.match(r"^\\boxed\s*\{", expr):
@@ -635,6 +640,21 @@ def _chunk_segment_units(
     max_components_per_message: int = 36,
 ) -> list[list[dict]]:
     """Split ordered units into message-sized chunks under Discord limits."""
+    def _unit_component_cost(unit: dict) -> int:
+        return 2 if unit.get("type") == "math" else 1
+
+    def _is_short_label_text(unit: dict) -> bool:
+        if unit.get("type") != "text":
+            return False
+        content = str(unit.get("content", "")).strip().lower()
+        if not content or "\n" in content or len(content) > 48:
+            return False
+        if content.startswith("step ") or content.startswith("final answer") or content.startswith("result"):
+            return True
+        if content in {"where", "with"}:
+            return True
+        return False
+
     batches: list[list[dict]] = []
     current: list[dict] = []
     current_math = 0
@@ -643,14 +663,26 @@ def _chunk_segment_units(
     for unit in units:
         is_math = unit.get("type") == "math"
         would_overflow_math = is_math and current_math >= max_math_per_message
-        unit_components = 2 if is_math else 1  # math + small separator
+        unit_components = _unit_component_cost(unit)  # math + small separator
         would_overflow_components = current_components + unit_components > max_components_per_message
 
         if current and (would_overflow_math or would_overflow_components):
+            carry: list[dict] = []
+            # Avoid orphaning short labels at the end of a card.
+            if _is_short_label_text(current[-1]):
+                moved = current.pop()
+                carry.append(moved)
+                current_components -= _unit_component_cost(moved)
+                if moved.get("type") == "math":
+                    current_math -= 1
+
             batches.append(current)
-            current = []
+            current = carry
             current_math = 0
-            current_components = 0
+            current_components = sum(_unit_component_cost(u) for u in current)
+            for moved in current:
+                if moved.get("type") == "math":
+                    current_math += 1
 
         current.append(unit)
         current_components += unit_components
@@ -848,7 +880,7 @@ async def _send_reply_with_math(
             for seg in segments:
                 if seg["type"] != "math":
                     continue
-                expr = str(seg["expression"])
+                expr = _sanitize_math_expression_for_render(seg["expression"])
                 if rendered_math_idx == math_count - 1:
                     expr = _boxed_expression(expr)
                 rendered_paths.append(
@@ -899,7 +931,7 @@ async def _send_reply_with_math(
                     else:
                         await _send(channel, chunk, force_silent=force_silent)
         else:
-            expr = str(seg["expression"])
+            expr = _sanitize_math_expression_for_render(seg["expression"])
             if math_seen == math_count - 1:
                 expr = _boxed_expression(expr)
             math_seen += 1

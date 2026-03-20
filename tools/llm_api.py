@@ -161,6 +161,8 @@ def chat(
 
     # --- Agentic loop ---------------------------------------------------------
     tool_calls_made = 0
+    previous_cycle_signature: str | None = None
+    repeated_cycle_count = 0
 
     while True:
         body: dict = {
@@ -216,6 +218,7 @@ def chat(
                 "tool_calls": raw_calls,
             })
 
+            cycle_rows: list[dict] = []
             # Execute each tool and append results.
             for tc in raw_calls:
                 tool_call_id = tc["id"]
@@ -248,11 +251,43 @@ def chat(
                     "name":         fn_name,
                     "content":      str(result),
                 })
+                cycle_rows.append(
+                    {
+                        "name": fn_name,
+                        "args": fn_args,
+                        "result": str(result),
+                    }
+                )
 
                 if on_tool_call is not None:
                     on_tool_call(fn_name, fn_args, str(result))
 
                 tool_calls_made += 1
+
+            # Guard against infinite loops: same tool call(s), same args, same
+            # results repeated across cycles.
+            cycle_signature = json.dumps(cycle_rows, sort_keys=True, ensure_ascii=True)
+            if cycle_signature == previous_cycle_signature:
+                repeated_cycle_count += 1
+            else:
+                repeated_cycle_count = 0
+            previous_cycle_signature = cycle_signature
+
+            if repeated_cycle_count >= 2 and cycle_rows:
+                if len(cycle_rows) == 1:
+                    row = cycle_rows[0]
+                    return (
+                        f"{row['result']}\n\n"
+                        f"(Stopped after repeated identical `{row['name']}` checks to avoid a loop.)"
+                    ).strip()
+                summary = "; ".join(
+                    f"{row['name']} -> {row['result']}"
+                    for row in cycle_rows
+                )
+                return (
+                    f"{summary}\n\n"
+                    "(Stopped after repeated identical tool-call cycles to avoid a loop.)"
+                ).strip()
 
             # Loop: send results back to the model.
             continue

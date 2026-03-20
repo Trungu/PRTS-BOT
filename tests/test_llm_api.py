@@ -227,3 +227,40 @@ def test_chat_logs_token_throughput_when_usage_available(monkeypatch: pytest.Mon
 
     assert result == "hello"
     assert any("tok/s=" in message for message, _level in logged)
+
+
+def test_chat_stops_repeated_identical_tool_cycles(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool_payload = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": {
+                                "name": "calculator",
+                                "arguments": json.dumps({"expression": "2+2"}),
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    responses = [DummyResponse(tool_payload), DummyResponse(tool_payload), DummyResponse(tool_payload)]
+
+    def fake_post(*args, **kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
+    monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setattr(llm_api.settings, "LLM_MODEL", "model-x")
+    monkeypatch.setattr(llm_api, "TOOLS", {"calculator": lambda _args: "No matching calendar events found."})
+
+    result = llm_api.chat("find events")
+    assert "No matching calendar events found." in result
+    assert "avoid a loop" in result

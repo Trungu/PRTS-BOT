@@ -134,6 +134,10 @@ def test_boxed_expression_wraps_when_needed() -> None:
     assert llm_cog._boxed_expression(r"\boxed{x+1}") == r"\boxed{x+1}"
 
 
+def test_sanitize_math_expression_for_render_trims_trailing_punctuation() -> None:
+    assert llm_cog._sanitize_math_expression_for_render(r"\frac{x}{2},") == r"\frac{x}{2}"
+
+
 def test_send_reply_with_math_bundles_multiple_expressions_into_single_message(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -236,6 +240,19 @@ def test_send_reply_with_math_bundles_multiple_expressions_into_single_message(
     assert card[6]["type"] == 14
 
     assert cleaned == [rendered_paths["x^2"], rendered_paths["y^2"]]
+
+
+def test_chunk_segment_units_carries_short_label_to_next_batch() -> None:
+    units = [
+        {"type": "text", "content": "A" * 3400},
+        {"type": "text", "content": "Final answer"},
+        {"type": "math", "math_idx": 0},
+    ]
+    batches = llm_cog._chunk_segment_units(units, max_components_per_message=2)
+    assert len(batches) == 2
+    assert batches[0] == [{"type": "text", "content": "A" * 3400}]
+    assert batches[1][0]["content"] == "Final answer"
+    assert batches[1][1]["type"] == "math"
 
 
 def test_send_reply_with_math_splits_when_more_than_ten_attachments(
